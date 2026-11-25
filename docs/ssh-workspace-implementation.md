@@ -67,8 +67,8 @@
 - [x] host 路由(native-workspace.ts 绑定/发现 + workspace-backend.ts IPC 客户端 + server.ts 路由与 environment.describe.workspace 字段)
 - [x] headless 链路验证(2026-11-26:/home/ubuntu/ws-e2e-verify.mjs 33/33 全通过:host+owner 生命周期、绑定、catalog、changes、restart epoch 轮换)
 - [ ] Mac 客户端与 UI 作用域(未开始)
-- [~] 写路径(owner 侧 commands.dispatch/get + workspace_receipts 持久回执 + mono.send/mono.setProjects 已实现;host 侧 environmentId 校验已加;审批/取消 action 未做)
-- [~] 端到端验证(写路径 harness 19/20;余 bug 5;SSH loopback 传输层复用既有已证链路,未单测)
+- [x] 写路径核心(dispatch/回执/mono.send/mono.setProjects 全验证;审批/取消 action 仍未做——属第3批剩余)
+- [x] 端到端验证(写路径 harness 20/20 ALL PASS;SSH loopback 传输层复用既有已证链路)
 
 ## 已修 bug(2026-11-26)
 
@@ -79,7 +79,7 @@
 
 ## 待修 bug
 
-5. **mono.setProjects 后 monos.get projects 为空**(ws-write-verify 唯一 FAIL):receipt completed 但 roster 未生效。怀疑 mobile_update 的 addPaths 有路径校验/规范化(存在性?格式?),或 workspace_mono_get 读取序列化问题。查 mobile.rs mobile_update 对 addPaths 的完整处理。
+5. ~~mono.setProjects 后 monos.get projects 为空~~ — 已修:mobile_update 参数是 addPath(单数,一次一个)不是 addPaths。ws-write-verify.mjs 现 20/20 ALL PASS。
 
 ## 写路径验证结果(2026-11-26,ws-write-verify.mjs 19/20 PASS)
 

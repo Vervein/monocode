@@ -447,8 +447,15 @@ impl Shell {
                     .filter(|path| !current.contains(path))
                     .map(String::as_str)
                     .collect();
-                let edit = json!({"addPaths": add, "removePaths": remove});
-                monos.update(cx, |monos, cx| monos.mobile_update(&id, &edit, cx))?;
+                // mobile_update takes one addPath at a time and a removePaths
+                // list, mirroring the desktop's settings edits.
+                monos.update(cx, |monos, cx| {
+                    monos.mobile_update(&id, &json!({"removePaths": remove}), cx)?;
+                    for path in &add {
+                        monos.mobile_update(&id, &json!({"addPath": path}), cx)?;
+                    }
+                    Ok::<_, String>(())
+                })?;
                 Ok(json!({"monoId": id, "projects": projects}))
             }
             action => Err(format!("Unsupported workspace action: {action}")),
