@@ -310,7 +310,17 @@ export function createHostServer(
           case "monos.profile":
           case "monos.history":
           case "monos.file":
-          case "workspace.commands.dispatch":
+          case "workspace.commands.dispatch": {
+            // The host's one piece of command intelligence: the envelope must
+            // name this environment, so a client of several machines never
+            // executes a command on the wrong one. Signatures and receipts
+            // stay the owner's business.
+            const command = (params.command ?? {}) as Record<string, unknown>;
+            if (command.environmentId && command.environmentId !== engine.store.environmentId)
+              throw new Error("Command names a different environment");
+            result = await nativeWorkspace.call(input.method, params);
+            break;
+          }
           case "workspace.commands.get":
             result = await nativeWorkspace.call(input.method, params);
             break;

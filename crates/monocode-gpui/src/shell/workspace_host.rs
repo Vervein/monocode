@@ -94,9 +94,8 @@ impl Shell {
             "monos.profile" => self.workspace_mono_profile(request, cx),
             "monos.history" => self.workspace_mono_history(request, cx),
             "monos.file" => self.workspace_mono_file(request, cx),
-            "workspace.commands.dispatch" | "workspace.commands.get" => {
-                request.reply(Err("Workspace commands are not enabled in this version".into()))
-            }
+            "workspace.commands.dispatch" => self.workspace_dispatch(request, cx),
+            "workspace.commands.get" => self.workspace_receipts(request),
             _ => request.reply(Err("Unsupported workspace method".into())),
         }
     }
@@ -107,6 +106,9 @@ impl Shell {
             capabilities::CHANGES,
             capabilities::MONO_READ,
             capabilities::MONO_FILES,
+            capabilities::MONO_SEND,
+            capabilities::MONO_PROJECT_LINKS,
+            capabilities::RECEIPTS,
         ]
         .iter()
         .map(|capability| capability.to_string())
@@ -310,6 +312,186 @@ impl Shell {
         let work = monos.update(cx, |monos, cx| monos.mobile_file(&id, &request.params, cx));
         cx.spawn(async move |_, _| request.reply(work.await))
             .detach();
+    }
+
+    /// The write path: validate, deduplicate by persistent receipt, execute
+    /// through the same domain calls the local UI uses, then record the
+    /// business outcome. A receipt is the owner's memory of acceptance, so a
+    /// retried command after a disconnect is answered, never repeated.
+    fn workspace_dispatch(&mut self, request: WorkspaceIpcRequest, cx: &mut Context<Self>) {
+        let command: monocode_core::workspace_protocol::WorkspaceCommand =
+            match serde_json::from_value(request.params["command"].clone()) {
+                Ok(command) => command,
+                Err(error) => return request.reply(Err(format!("Invalid command envelope: {error}"))),
+            };
+        let owner_epoch = self.workspace_host.owner_epoch.clone();
+        let command_id = command.command_id.clone();
+        let receipt_json = |status: &str, result: Option<Value>| {
+            json!({
+                "commandId": command_id,
+                "status": status,
+                "result": result,
+                "ownerEpoch": owner_epoch,
+            })
+        };
+        if command.command_id.is_empty() {
+            return request.reply(Err("Command id is required".into()));
+        }
+        // Identity mismatches reject without touching state or persistence:
+        // a command for another workspace is never ours to remember.
+        if command.workspace_source_id != self.workspace_host.source_id {
+            return request.reply(Ok(receipt_json(
+                "rejected",
+                Some(json!({"reason": "Command names a different workspace"})),
+            )));
+        }
+        if let Some(epoch) = &command.expected_owner_epoch
+            && epoch != &self.workspace_host.owner_epoch
+        {
+            return request.reply(Ok(receipt_json(
+                "rejected",
+                Some(json!({"reason": "Owner restarted since the command was prepared"})),
+            )));
+        }
+        let signature = monocode_core::workspace_protocol::command_signature(&command);
+        let existing = locked(&self.store).and_then(|store| store.workspace_receipt(&command.command_id));
+        match existing {
+            Ok(Some((stored_signature, status, result))) => {
+                if stored_signature == signature {
+                    // The retry of an accepted command: answer from memory.
+                    let result = result.and_then(|text| serde_json::from_str::<Value>(&text).ok());
+                    return request.reply(Ok(receipt_json(&status, result)));
+                }
+                return request.reply(Ok(receipt_json(
+                    "rejected",
+                    Some(json!({"reason": "Command id was already used for a different command"})),
+                )));
+            }
+            Ok(None) => {}
+            Err(error) => return request.reply(Err(format!("Cannot read receipts: {error}"))),
+        }
+        if let Err(error) = locked(&self.store)
+            .and_then(|store| store.save_workspace_receipt(&command.command_id, &signature, "accepted", None))
+        {
+            return request.reply(Err(format!("Cannot record the command: {error}")));
+        }
+
+        let outcome = self.execute_workspace_command(&command, cx);
+        let (status, result) = match outcome {
+            Ok(result) => ("completed", Some(result)),
+            Err(error) => ("failed", Some(json!({"error": error}))),
+        };
+        let encoded = result.as_ref().map(|value| value.to_string());
+        if let Err(error) = locked(&self.store).and_then(|store| {
+            store.save_workspace_receipt(&command.command_id, &signature, status, encoded.as_deref())
+        }) {
+            return request.reply(Err(format!("Cannot record the outcome: {error}")));
+        }
+        request.reply(Ok(receipt_json(status, result)));
+    }
+
+    /// Executes one validated command. `completed` means the business effect
+    /// the action promises — for mono.send, that the message is queued to the
+    /// Mono's own conversation — never that the task has finished.
+    fn execute_workspace_command(
+        &mut self,
+        command: &monocode_core::workspace_protocol::WorkspaceCommand,
+        cx: &mut Context<Self>,
+    ) -> Result<Value, String> {
+        let Some(monos) = self.monos.clone() else {
+            return Err("Monos are not available in this window".into());
+        };
+        match command.action.as_str() {
+            "mono.send" => {
+                let id = command.target.id.clone();
+                let text = command.payload["text"].as_str().unwrap_or_default().to_string();
+                if text.is_empty() {
+                    return Err("mono.send requires payload.text".into());
+                }
+                let attachments: Vec<String> = command.payload["attachments"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect();
+                monos.update(cx, |monos, cx| monos.mobile_send(&id, text, attachments, cx))?;
+                let session = monos.read(cx).roster.get(&id).and_then(|mono| mono.session_id);
+                Ok(json!({"queued": true, "monoId": id, "sessionId": session}))
+            }
+            "mono.setProjects" => {
+                let id = command.target.id.clone();
+                let projects: Vec<String> = command.payload["projects"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(Value::as_str)
+                    .map(str::to_owned)
+                    .collect();
+                // Project binding reuses the phone's edit path so validation,
+                // normalization, chat reconfiguration and persistence stay
+                // exactly what a local edit would do.
+                let current = monos
+                    .read(cx)
+                    .roster
+                    .get(&id)
+                    .map(|mono| mono.projects.clone())
+                    .ok_or("Mono is no longer available")?;
+                let remove: Vec<&str> = current
+                    .iter()
+                    .filter(|path| !projects.contains(path))
+                    .map(String::as_str)
+                    .collect();
+                let add: Vec<&str> = projects
+                    .iter()
+                    .filter(|path| !current.contains(path))
+                    .map(String::as_str)
+                    .collect();
+                let edit = json!({"addPaths": add, "removePaths": remove});
+                monos.update(cx, |monos, cx| monos.mobile_update(&id, &edit, cx))?;
+                Ok(json!({"monoId": id, "projects": projects}))
+            }
+            action => Err(format!("Unsupported workspace action: {action}")),
+        }
+    }
+
+    /// Receipt lookup is the answer to "did my command land after I lost the
+    /// response": unknown is an honest answer for a command this owner never
+    /// accepted, distinct from every executed outcome.
+    fn workspace_receipts(&mut self, request: WorkspaceIpcRequest) {
+        let mut ids: Vec<String> = Vec::new();
+        if let Some(id) = request.params["commandId"].as_str() {
+            ids.push(id.to_string());
+        }
+        if let Some(list) = request.params["commandIds"].as_array() {
+            ids.extend(list.iter().filter_map(Value::as_str).map(str::to_owned));
+        }
+        if ids.is_empty() {
+            return request.reply(Err("commandId or commandIds is required".into()));
+        }
+        let answer = locked(&self.store).and_then(|store| {
+            let mut receipts = Vec::new();
+            for id in &ids {
+                match store.workspace_receipt(id)? {
+                    Some((_, status, result)) => {
+                        let result = result.and_then(|text| serde_json::from_str::<Value>(&text).ok());
+                        receipts.push(json!({
+                            "commandId": id,
+                            "status": status,
+                            "result": result,
+                            "ownerEpoch": self.workspace_host.owner_epoch,
+                        }));
+                    }
+                    None => receipts.push(json!({
+                        "commandId": id,
+                        "status": "unknown",
+                        "result": null,
+                    })),
+                }
+            }
+            Ok(json!({"receipts": receipts}))
+        });
+        request.reply(answer);
     }
 
     /// A Mono's conversation from the original store only: browsing never

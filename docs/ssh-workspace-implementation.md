@@ -65,10 +65,23 @@
 - [x] 契约层(workspace_protocol.rs + workspace_ipc.rs 含测试;protocol.ts 类型;remote.rs 白名单)
 - [x] owner IPC 服务(shell/workspace_host.rs:describe/catalog/changes/monos.get/profile/history/file;catalog 投影已从 mobile publish 提取为 assemble_catalog+catalog_inputs 共享;workspace_commands 暂未实现返回 unsupported)
 - [x] host 路由(native-workspace.ts 绑定/发现 + workspace-backend.ts IPC 客户端 + server.ts 路由与 environment.describe.workspace 字段)
-- [ ] headless 链路验证
-- [ ] Mac 客户端与 UI 作用域
-- [ ] 写路径
-- [ ] 端到端验证
+- [x] headless 链路验证(2026-11-26:/home/ubuntu/ws-e2e-verify.mjs 33/33 全通过:host+owner 生命周期、绑定、catalog、changes、restart epoch 轮换)
+- [ ] Mac 客户端与 UI 作用域(未开始)
+- [~] 写路径(owner 侧 commands.dispatch/get + workspace_receipts 持久回执 + mono.send/mono.setProjects 已实现;host 侧 environmentId 校验已加;审批/取消 action 未做)
+- [~] 端到端验证(/home/ubuntu/ws-write-verify.mjs 写路径 harness:链路已通,但有 2 个真实 bug 待修——见下)
+
+## 待修 bug(写路径验证发现,2026-11-26)
+
+1. **workspace_receipts 表不存在**:gpui 应用实际使用的 store 可能不走 store.rs open() 的 execute_batch(它打开 monocode.db.gpui.sqlite3,可能是 shared/desktop schema 模式,uses_monocode_schema()=true)。需要查 store.rs 的 shared 模式在哪建表,把 workspace_receipts 的 CREATE TABLE IF NOT EXISTS 加到 gpui 实际使用的连接路径上;或者改成惰性建表(save_workspace_receipt 里先 CREATE IF NOT EXISTS——最稳)。
+2. **mono-roster 种子不生效**:shared 模式下 setting() 走 shared_setting(读 desktop schema 的表,不是 native_settings)。ws-write-verify.mjs 的种子写进了 native_settings 三张表但 roster 实际在别处。查 shared_setting 实现,种子要写对应表;这也影响真实迁移逻辑对既有数据的读取(重要:monos 在 gpui 模式下的持久化位置必须在文档里记准)。
+3. GPUI 进程对 SIGTERM 不立即退出(可能忽略或极慢),harness 一律用 SIGKILL。
+4. pkill -f monocode-gpui 会匹配 shell 自身命令行自杀,必须分开执行或用 "monocode-gpu[i]" 模式且同一命令行里不能出现该路径。
+
+## 验证 harness(云端主机自测)
+
+- /home/ubuntu/ws-e2e-verify.mjs — 只读链路 33 项,全 PASS(2026-11-26)
+- /home/ubuntu/ws-write-verify.mjs — 写路径 harness,通过 9 项(foreign 拒绝/epoch 拒绝/history 空读等),余下失败全部由上面 bug 1+2 引起
+- 运行方法:node ws-e2e-verify.mjs(自备 host+owner 生命周期,端口 4374/4375,数据目录 /tmp/ws-*)
 
 ## 实施要点(跨 session 恢复用)
 

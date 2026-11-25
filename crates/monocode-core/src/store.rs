@@ -117,7 +117,10 @@ impl Store {
             row_ix INTEGER NOT NULL, role TEXT NOT NULL, body TEXT NOT NULL, first INTEGER NOT NULL,
             PRIMARY KEY(session_id,row_ix));
           CREATE TABLE IF NOT EXISTS native_reminders(session_id INTEGER PRIMARY KEY REFERENCES native_sessions(id),
-            due_at INTEGER NOT NULL, fired_at INTEGER);").map_err(|e| e.to_string())?;
+            due_at INTEGER NOT NULL, fired_at INTEGER);
+          CREATE TABLE IF NOT EXISTS workspace_receipts(command_id TEXT PRIMARY KEY,
+            signature TEXT NOT NULL, status TEXT NOT NULL, result TEXT,
+            created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);").map_err(|e| e.to_string())?;
         let columns = conn
             .prepare("PRAGMA table_info(native_sessions)")
             .map_err(|e| e.to_string())?
@@ -211,6 +214,47 @@ impl Store {
         }
 
         self.conn.execute("INSERT INTO native_settings(key,value) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET value=excluded.value", params![key,value])
+            .map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    /// A workspace command receipt by its client-chosen id.
+    pub fn workspace_receipt(&self, command_id: &str) -> Result<Option<(String, String, Option<String>)>, String> {
+        let found = self
+            .conn
+            .query_row(
+                "SELECT signature, status, result FROM workspace_receipts WHERE command_id=?",
+                [command_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)),
+            );
+        match found {
+            Ok(row) => Ok(Some(row)),
+            Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
+    /// Records or updates the durable receipt of a workspace command. The
+    /// receipt is the owner's memory of what it accepted; it survives
+    /// restarts so a retried command is never executed twice.
+    pub fn save_workspace_receipt(
+        &self,
+        command_id: &str,
+        signature: &str,
+        status: &str,
+        result: Option<&str>,
+    ) -> Result<(), String> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_millis() as i64;
+        self.conn
+            .execute(
+                "INSERT INTO workspace_receipts(command_id, signature, status, result, created_at, updated_at)
+                 VALUES(?, ?, ?, ?, ?, ?)
+                 ON CONFLICT(command_id) DO UPDATE SET status=excluded.status, result=excluded.result, updated_at=excluded.updated_at",
+                rusqlite::params![command_id, signature, status, result, now, now],
+            )
             .map_err(|e| e.to_string())?;
         Ok(())
     }
