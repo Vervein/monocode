@@ -398,6 +398,45 @@ impl Workspaces {
             .on_click(cx.listener(move |this, _, _, cx| this.open_mono(&entry, cx)))
     }
 
+    fn project_row(&self, entry: &Value) -> impl IntoElement {
+        let path = entry["path"].as_str().unwrap_or_default().to_string();
+        let name = entry["name"]
+            .as_str()
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| {
+                path.rsplit('/').next().unwrap_or(&path).to_string()
+            });
+        let branch = entry["branch"].as_str().unwrap_or_default().to_string();
+        div()
+            .px_3()
+            .py_2()
+            .rounded_md()
+            .bg(content(0.03))
+            .flex()
+            .items_center()
+            .gap_2()
+            .child(icon("folder", 13.))
+            .child(div().text_size(px(13.)).child(name))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w_0()
+                    .truncate()
+                    .text_size(px(11.))
+                    .text_color(content(0.4))
+                    .child(path),
+            )
+            .when(!branch.is_empty(), |d| {
+                d.child(
+                    div()
+                        .text_size(px(11.))
+                        .text_color(content(0.45))
+                        .child(branch),
+                )
+            })
+    }
+
     fn detail_view(&self, cx: &mut Context<Self>) -> Option<impl IntoElement> {
         let detail = self.detail.as_ref()?;
         let messages = detail
@@ -557,6 +596,18 @@ impl gpui::Render for Workspaces {
                     }
                     for entry in &monos {
                         list = list.child(self.mono_card(entry, cx));
+                    }
+                    if !projects.is_empty() {
+                        list = list.child(
+                            div()
+                                .pt_2()
+                                .text_size(px(11.))
+                                .text_color(content(0.45))
+                                .child("Projects"),
+                        );
+                        for entry in &projects {
+                            list = list.child(self.project_row(entry));
+                        }
                     }
                     div()
                         .flex()
