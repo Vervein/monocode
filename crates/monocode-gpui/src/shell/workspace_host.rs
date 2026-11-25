@@ -108,6 +108,7 @@ impl Shell {
             capabilities::MONO_FILES,
             capabilities::MONO_SEND,
             capabilities::MONO_PROJECT_LINKS,
+            capabilities::MONO_APPROVALS,
             capabilities::RECEIPTS,
         ]
         .iter()
@@ -457,6 +458,39 @@ impl Shell {
                     Ok::<_, String>(())
                 })?;
                 Ok(json!({"monoId": id, "projects": projects}))
+            }
+            "mono.cancel" => {
+                let id = command.target.id.clone();
+                // Cancellation is idempotent: a Mono without a busy turn has
+                // nothing to interrupt, which is the same end state as a
+                // cancelled one.
+                let mut cancelled = false;
+                if let Some(chat) = monos.read(cx).open_chat(&id) {
+                    chat.update(cx, |chat, cx| {
+                        cancelled = chat.responding() || cancelled;
+                        chat.stop_if_busy(cx);
+                    });
+                } else if monos.read(cx).roster.get(&id).is_none() {
+                    return Err("Mono is no longer available".into());
+                }
+                Ok(json!({"monoId": id, "cancelled": cancelled}))
+            }
+            "mono.answerQuestion" => {
+                let id = command.target.id.clone();
+                let request_id = command.payload["requestId"]
+                    .as_u64()
+                    .ok_or("mono.answerQuestion requires payload.requestId")?;
+                // An omitted reply holds a timed question open rather than
+                // answering it, mirroring the phone's keepQuestionOpen.
+                let reply = command.payload.get("reply").cloned();
+                let chat = monos
+                    .read(cx)
+                    .open_chat(&id)
+                    .ok_or("This question was already answered")?;
+                chat.update(cx, |chat, cx| {
+                    chat.mobile_answer_question(request_id, reply.as_ref(), cx)
+                })?;
+                Ok(json!({"monoId": id, "answered": reply.is_some()}))
             }
             action => Err(format!("Unsupported workspace action: {action}")),
         }

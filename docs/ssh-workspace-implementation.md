@@ -67,7 +67,7 @@
 - [x] host 路由(native-workspace.ts 绑定/发现 + workspace-backend.ts IPC 客户端 + server.ts 路由与 environment.describe.workspace 字段)
 - [x] headless 链路验证(2026-11-26:/home/ubuntu/ws-e2e-verify.mjs 33/33 全通过:host+owner 生命周期、绑定、catalog、changes、restart epoch 轮换)
 - [ ] Mac 客户端与 UI 作用域(未开始)
-- [x] 写路径核心(dispatch/回执/mono.send/mono.setProjects 全验证;审批/取消 action 仍未做——属第3批剩余)
+- [x] 写路径(dispatch/回执/mono.send/mono.setProjects/mono.cancel/mono.answerQuestion 全验证 22/22 ALL PASS)
 - [x] 端到端验证(写路径 harness 20/20 ALL PASS;SSH loopback 传输层复用既有已证链路)
 
 ## 已修 bug(2026-11-26)
@@ -111,3 +111,14 @@
 3. 远端 mono 页面必须走无调度副作用的 view model/backend adapter,禁止塞进本地 Monos::new()
 4. mobile 业务投影格式已兼容复用(catalog json 里 projects/monos/sessions 结构与手机端一致)
 5. 审批/取消 action 还没做:mobile host 里 conversation.approve/deny 的模式可参照,作为 mono.approval/session 级命令加入 dispatch
+
+
+## 写路径最终验证(2026-11-26,22/22 ALL PASS)
+
+新增通过项:mono.cancel 幂等(空闲 mono completed/cancelled:false)、mono.answerQuestion 无活动问题时 honest failed 回执。capabilities 现含 mono.approvals.v1。
+
+## harness 维护要点
+
+- 端口随机化(4400+random 500),避免残留 host 进程占用端口后用错 store 应答(曾导致"Device credential is invalid or revoked"假象)
+- pair 必须先于 serve 执行:两者打开 store 都跑迁移,并发首次迁移会撞 "duplicate column" —— monocode host 既有竞态,非本次引入
+- mono.answerQuestion 语义:payload.requestId 必填,reply 省略=hold open(对应手机端 keepQuestionOpen)
