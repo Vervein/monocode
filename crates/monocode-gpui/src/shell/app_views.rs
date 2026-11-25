@@ -14,6 +14,7 @@ impl Shell {
             AppView::Inbox => "Inbox",
             AppView::Notes => "Notes",
             AppView::Automations => "Automations",
+            AppView::Machines => "Machines",
         })
     }
 
@@ -220,7 +221,24 @@ impl Shell {
             AppView::Notes => self.notes.clone().map(IntoElement::into_any_element),
             AppView::Inbox => self.inbox.clone().map(IntoElement::into_any_element),
             AppView::Automations => self.automations.clone().map(IntoElement::into_any_element),
+            AppView::Machines => self.machines.clone().map(IntoElement::into_any_element),
         }
+    }
+
+    pub(super) fn open_machines(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.prepare_app_view(window, cx);
+        if self.machines.is_none() {
+            let view = cx.new(|cx| crate::workspaces::Workspaces::new(self.remote.clone(), cx));
+            self.app_view_events.push(cx.subscribe_in(
+                &view,
+                window,
+                |this, _, event: &crate::workspaces::Event, window, cx| match event {
+                    crate::workspaces::Event::Close => this.close_app_view(window, cx),
+                },
+            ));
+            self.machines = Some(view);
+        }
+        self.show_app_view(AppView::Machines, window, cx);
     }
 
     pub(super) fn focus_app_view(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -230,6 +248,7 @@ impl Shell {
             Some(AppView::Automations) => {
                 self.automations.as_ref().map(|view| view.focus_handle(cx))
             }
+            Some(AppView::Machines) => self.machines.as_ref().map(|view| view.focus_handle(cx)),
             None => return false,
         };
         if let Some(focus) = focus {

@@ -40,6 +40,7 @@ mod history;
 mod image_lightbox;
 mod image_memory;
 mod inbox;
+mod workspaces;
 mod ink_field;
 mod input;
 mod markdown;
