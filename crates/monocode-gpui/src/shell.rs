@@ -15,6 +15,7 @@ mod image_lightbox_tests;
 mod layout;
 mod live_agents;
 mod mobile_host;
+mod workspace_host;
 mod mono_panes;
 pub(crate) mod monos;
 mod new_chat_choice;
@@ -614,6 +615,7 @@ pub(crate) struct Shell {
     image_lightbox: Option<(Entity<crate::image_lightbox::ImageLightbox>, Subscription)>,
     app_bridge: Option<monocode_core::mono::bridge::Server>,
     mobile: mobile_host::Mobile,
+    workspace_host: workspace_host::Workspace,
     app_results: HashMap<(i64, String), (String, Result<serde_json::Value, String>)>,
     app_pending: HashSet<(i64, String)>,
     orchestrations: HashMap<i64, orchestration::Run>,
@@ -1018,6 +1020,7 @@ impl Shell {
             image_lightbox: None,
             app_bridge: None,
             mobile: mobile_host::Mobile::default(),
+            workspace_host: workspace_host::Workspace::default(),
             app_results: HashMap::new(),
             app_pending: HashSet::new(),
             orchestrations: HashMap::new(),
@@ -1304,6 +1307,7 @@ impl Shell {
             this.session_summaries.insert(summary.id, summary);
         }
         this.init_mobile_host(cx);
+        this.init_workspace_host(cx);
         if let Some(id) = this.workspace.active {
             this.ensure_session(this.workspace.session_for_pane(id), cx);
             this.record_worktree_session(id, cx);

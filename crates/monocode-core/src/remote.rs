@@ -480,6 +480,16 @@ fn supported_remote_method(method: &str) -> bool {
             | "git.index"
             | "git.fileDiff"
             | "git.action"
+            | "workspace.describe"
+            | "workspace.catalog"
+            | "workspace.changes"
+            | "workspace.bind"
+            | "monos.get"
+            | "monos.profile"
+            | "monos.history"
+            | "monos.file"
+            | "workspace.commands.dispatch"
+            | "workspace.commands.get"
     )
 }
 

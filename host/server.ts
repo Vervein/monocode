@@ -17,6 +17,7 @@ import { writeAttachmentChunk, readAttachmentChunk } from "./attachments";
 import type { LinkedWorkItem } from "../src/features/sessions/model/session";
 import { parseGithubWorkItemUrl } from "../src/features/sessions/model/sessionWorkItem";
 import { SyncTransfers } from "./sync-transfer";
+import { NativeWorkspace } from "./native-workspace";
 import { browseHostDirectories } from "./browse";
 import {
   createHostBranch,
@@ -145,6 +146,7 @@ export function createHostServer(
     engine.store,
     (projectId, action) => engine.withIdleProject(projectId, action),
   );
+  const nativeWorkspace = new NativeWorkspace(engine.store);
   const models = async (projectId?: unknown) => {
     const cwd =
       typeof projectId === "string"
@@ -253,12 +255,14 @@ export function createHostServer(
             : {};
         let result: unknown;
         switch (input.method) {
-          case "environment.describe":
+          case "environment.describe": {
+            const workspaceDescription = await nativeWorkspace.describe();
             result = {
               protocolVersion: HOST_PROTOCOL_VERSION,
               environmentId: engine.store.environmentId,
               name: hostname(),
               platform: process.platform,
+              workspace: workspaceDescription,
               // Older clients validate this list against Codex and Claude only.
               providers: providers.filter((provider) =>
                 Array.isArray(params.supportedProviders)
@@ -292,9 +296,31 @@ export function createHostServer(
                 "attachments.read",
                 "sessions.draft",
                 "sessions.plan",
+                ...workspaceDescription.capabilities,
               ],
             };
             break;
+          }
+          case "workspace.describe":
+            result = await nativeWorkspace.describe();
+            break;
+          case "workspace.catalog":
+          case "workspace.changes":
+          case "monos.get":
+          case "monos.profile":
+          case "monos.history":
+          case "monos.file":
+          case "workspace.commands.dispatch":
+          case "workspace.commands.get":
+            result = await nativeWorkspace.call(input.method, params);
+            break;
+          case "workspace.bind": {
+            const sourceId = String(params.workspaceSourceId ?? "");
+            if (!sourceId) throw new Error("Invalid workspace source");
+            nativeWorkspace.bind(sourceId);
+            result = await nativeWorkspace.describe();
+            break;
+          }
           case "projects.list":
             result = engine.store.projects();
             break;
