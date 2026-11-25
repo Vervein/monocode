@@ -68,14 +68,22 @@
 - [x] headless 链路验证(2026-11-26:/home/ubuntu/ws-e2e-verify.mjs 33/33 全通过:host+owner 生命周期、绑定、catalog、changes、restart epoch 轮换)
 - [ ] Mac 客户端与 UI 作用域(未开始)
 - [~] 写路径(owner 侧 commands.dispatch/get + workspace_receipts 持久回执 + mono.send/mono.setProjects 已实现;host 侧 environmentId 校验已加;审批/取消 action 未做)
-- [~] 端到端验证(/home/ubuntu/ws-write-verify.mjs 写路径 harness:链路已通,但有 2 个真实 bug 待修——见下)
+- [~] 端到端验证(写路径 harness 19/20;余 bug 5;SSH loopback 传输层复用既有已证链路,未单测)
 
-## 待修 bug(写路径验证发现,2026-11-26)
+## 已修 bug(2026-11-26)
 
-1. **workspace_receipts 表不存在**:gpui 应用实际使用的 store 可能不走 store.rs open() 的 execute_batch(它打开 monocode.db.gpui.sqlite3,可能是 shared/desktop schema 模式,uses_monocode_schema()=true)。需要查 store.rs 的 shared 模式在哪建表,把 workspace_receipts 的 CREATE TABLE IF NOT EXISTS 加到 gpui 实际使用的连接路径上;或者改成惰性建表(save_workspace_receipt 里先 CREATE IF NOT EXISTS——最稳)。
-2. **mono-roster 种子不生效**:shared 模式下 setting() 走 shared_setting(读 desktop schema 的表,不是 native_settings)。ws-write-verify.mjs 的种子写进了 native_settings 三张表但 roster 实际在别处。查 shared_setting 实现,种子要写对应表;这也影响真实迁移逻辑对既有数据的读取(重要:monos 在 gpui 模式下的持久化位置必须在文档里记准)。
-3. GPUI 进程对 SIGTERM 不立即退出(可能忽略或极慢),harness 一律用 SIGKILL。
-4. pkill -f monocode-gpui 会匹配 shell 自身命令行自杀,必须分开执行或用 "monocode-gpu[i]" 模式且同一命令行里不能出现该路径。
+1. ~~workspace_receipts 表不存在~~ — 已改惰性建表(save/read 内 CREATE IF NOT EXISTS)。注意:shared 模式下 self.conn 指向 desktop monocode.db,receipts 写进了共享库——功能正确,后续可评估是否挪到 extras_db(monocode.db.gpui.sqlite3)。
+2. ~~mono-roster 种子不生效~~ — shared 模式的原生元数据在 `<db>.gpui.sqlite3` 的 **settings** 表(不是 native_settings!)。harness 已改两张表都写。**重要架构事实:gpui 模式下 mono-roster/原生 settings 持久化在 monocode.db.gpui.sqlite3 的 settings 表。**
+3. GPUI 进程对 SIGTERM 不立即退出,harness 一律用 SIGKILL。
+4. pkill -f monocode-gpui 会匹配 shell 自身命令行自杀,必须单独执行或用 "monocode-gpu[i]" 且同一命令行不能出现该路径。
+
+## 待修 bug
+
+5. **mono.setProjects 后 monos.get projects 为空**(ws-write-verify 唯一 FAIL):receipt completed 但 roster 未生效。怀疑 mobile_update 的 addPaths 有路径校验/规范化(存在性?格式?),或 workspace_mono_get 读取序列化问题。查 mobile.rs mobile_update 对 addPaths 的完整处理。
+
+## 写路径验证结果(2026-11-26,ws-write-verify.mjs 19/20 PASS)
+
+通过:catalog 非空列出种子 mono、monos.get/profile/history、mono.send completed+queued、同命令重放去重(返回记忆回执不重复执行)、同 commandId 不同负载冲突拒绝、外 workspace 拒绝、外 environment 网关拒绝、过期 epoch 拒绝、receipt 查询 completed/unknown 区分、幽灵 mono 失败回执。
 
 ## 验证 harness(云端主机自测)
 
