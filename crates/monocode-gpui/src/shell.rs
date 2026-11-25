@@ -16,6 +16,7 @@ mod layout;
 mod live_agents;
 mod mobile_host;
 mod workspace_host;
+mod remote_workspace;
 mod mono_panes;
 pub(crate) mod monos;
 mod new_chat_choice;
@@ -616,6 +617,7 @@ pub(crate) struct Shell {
     app_bridge: Option<monocode_core::mono::bridge::Server>,
     mobile: mobile_host::Mobile,
     workspace_host: workspace_host::Workspace,
+    remote_workspaces: remote_workspace::RemoteWorkspaces,
     app_results: HashMap<(i64, String), (String, Result<serde_json::Value, String>)>,
     app_pending: HashSet<(i64, String)>,
     orchestrations: HashMap<i64, orchestration::Run>,
@@ -1021,6 +1023,7 @@ impl Shell {
             app_bridge: None,
             mobile: mobile_host::Mobile::default(),
             workspace_host: workspace_host::Workspace::default(),
+            remote_workspaces: remote_workspace::RemoteWorkspaces::default(),
             app_results: HashMap::new(),
             app_pending: HashSet::new(),
             orchestrations: HashMap::new(),
