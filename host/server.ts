@@ -193,7 +193,7 @@ export function createHostServer(
     }
     return catalog;
   };
-  return createServer(
+  const server = createServer(
     { requestTimeout: 20_000, headersTimeout: 10_000, maxHeaderSize: 8192 },
     async (request, response) => {
       if (request.url === "/lifecycle" && lifecycle) {
@@ -663,4 +663,8 @@ export function createHostServer(
       }
     },
   );
+  // An idle IPC connection to the workspace owner must not hold the host
+  // process open once its server has shut down.
+  server.on("close", () => nativeWorkspace.close());
+  return server;
 }

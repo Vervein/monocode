@@ -89,6 +89,13 @@ export class WorkspaceIpcClient {
     return this.descriptor.ownerEpoch;
   }
 
+  /** A dropped socket never serves again, but the owner behind it may be
+   * fine — the caller uses this to retire the client object itself and open
+   * a fresh connection to the same owner. */
+  get closed(): boolean {
+    return this.broken;
+  }
+
   private open(): Promise<Socket> {
     if (this.socket) return Promise.resolve(this.socket);
     if (this.connecting) return this.connecting;

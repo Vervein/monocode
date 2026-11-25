@@ -117,10 +117,23 @@ export class NativeWorkspace {
     return found.sort((a, b) => a.startedAt - b.startedAt);
   }
 
+  /** Releases the IPC socket so host shutdown is not held open by an
+   * idle connection to the owner. */
+  close() {
+    this.client?.close();
+    this.client = null;
+    this.clientPid = 0;
+  }
+
   private connection(descriptor: BackendDescriptorFile): WorkspaceIpcClient {
     // Any restart or replacement of the owner invalidates the old connection:
     // the epoch inside the new descriptor differs, and the old socket is dead.
-    if (this.client && this.clientPid === descriptor.pid && this.client.ownerEpoch === descriptor.ownerEpoch)
+    if (
+      this.client &&
+      !this.client.closed &&
+      this.clientPid === descriptor.pid &&
+      this.client.ownerEpoch === descriptor.ownerEpoch
+    )
       return this.client;
     this.client?.close();
     this.client = new WorkspaceIpcClient(descriptor);
