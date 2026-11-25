@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync } from "node:fs";
+import { readdirSync, readFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import type { HostStore } from "./store";
 import {
@@ -105,7 +105,13 @@ export class NativeWorkspace {
         continue;
       }
       const descriptor = parseDescriptor(raw);
-      if (!descriptor || !pidAlive(descriptor.pid)) continue;
+      if (!descriptor) continue;
+      if (!pidAlive(descriptor.pid)) {
+        // A dead owner cannot serve again; its descriptor only confuses
+        // discovery, so remove it rather than surfacing a ghost candidate.
+        rmSync(join(this.backendsDir, name), { force: true });
+        continue;
+      }
       found.push(descriptor);
     }
     return found.sort((a, b) => a.startedAt - b.startedAt);

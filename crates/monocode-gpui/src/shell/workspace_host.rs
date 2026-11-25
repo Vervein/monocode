@@ -3,8 +3,7 @@
 //! domain handlers so a remote desktop sees exactly what a paired phone sees,
 //! without the phone pairing transport.
 use super::mobile_host::{
-    CatalogInputs, PageLook, Saved, Snapshot, Target, assemble_catalog, older_page, page_turn,
-    project_id, saved_snapshot, string,
+    PageLook, Saved, Target, assemble_catalog, older_page, page_turn, saved_snapshot, string,
 };
 use super::*;
 use crate::mobile::transcript as turns;
@@ -61,6 +60,13 @@ impl Shell {
         self.workspace_host.source_id = info.source_id;
         self.workspace_host.owner_epoch = info.owner_epoch;
         self.workspace_host.ipc = Some(ipc);
+        // Close the endpoint with the app so a stale socket never outlives
+        // the owner it belongs to.
+        cx.on_app_quit(|this, _| {
+            this.shutdown_workspace_host();
+            async {}
+        })
+        .detach();
         cx.spawn(async move |this, cx| {
             while let Ok(event) = events.recv().await {
                 if this

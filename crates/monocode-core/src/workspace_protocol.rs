@@ -121,7 +121,7 @@ pub struct CatalogPage {
     pub sessions: Vec<Value>,
     /// References into other environments (e.g. a Mono linked to a `remote://`
     /// project). Shown read-only; never operable in this environment.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(default)]
     pub external_references: Vec<Value>,
 }
 

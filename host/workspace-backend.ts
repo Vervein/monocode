@@ -93,7 +93,7 @@ export class WorkspaceIpcClient {
     if (this.socket) return Promise.resolve(this.socket);
     if (this.connecting) return this.connecting;
     if (this.broken) return Promise.reject(new Error("Workspace owner connection is closed"));
-    this.connecting = new Promise((resolve, reject) => {
+    const opening: Promise<Socket> = new Promise((resolve, reject) => {
       const socket = new Socket();
       const fail = (error: Error) => {
         socket.destroy();
@@ -110,16 +110,18 @@ export class WorkspaceIpcClient {
             protocol: IPC_PROTOCOL_VERSION,
           }) + "\n",
         );
-        socket.on("data", (chunk) => this.consume(chunk));
+        socket.on("data", (chunk: Buffer) => this.consume(chunk));
         socket.on("error", () => this.drop(new Error("Workspace owner connection failed")));
         socket.on("close", () => this.drop(new Error("Workspace owner disconnected")));
         this.socket = socket;
         resolve(socket);
       });
-    }).finally(() => {
-      this.connecting = null;
     });
-    return this.connecting;
+    this.connecting = opening;
+    opening.finally(() => {
+      if (this.connecting === opening) this.connecting = null;
+    }).catch(() => {});
+    return opening;
   }
 
   private consume(chunk: Buffer) {
