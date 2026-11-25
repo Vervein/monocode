@@ -43,6 +43,10 @@ struct MonoDetail {
     busy: bool,
     input: Entity<Input>,
     sending: bool,
+    /// The command the current draft was last dispatched as. Retrying the
+    /// same text reuses the id, so a send whose receipt was lost in transit
+    /// is answered from the owner's memory instead of queued twice.
+    pending_command: Option<(String, String)>,
     notice: String,
     /// Incremented on every send so a late history answer never overwrites
     /// a newer read.
@@ -87,6 +91,25 @@ impl Workspaces {
             this.select(id, cx);
         }
         this
+    }
+
+    /// Re-reads the connection list: machines added or removed in Settings
+    /// after this view first opened must show up without an app restart.
+    pub(crate) fn reload_machines(&mut self, cx: &mut Context<Self>) {
+        self.machines = self.remote.list().unwrap_or_default();
+        self.replicas
+            .retain(|id, _| self.machines.iter().any(|machine| &machine.id == id));
+        if let Some(selected) = self.selected.clone()
+            && !self.machines.iter().any(|machine| machine.id == selected)
+        {
+            self.selected = None;
+            self.detail = None;
+        }
+        if self.selected.is_none() && self.machines.len() == 1 {
+            let id = self.machines[0].id.clone();
+            self.select(id, cx);
+        }
+        cx.notify();
     }
 
     fn select(&mut self, machine_id: String, cx: &mut Context<Self>) {
@@ -177,7 +200,8 @@ impl Workspaces {
             messages: Vec::new(),
             busy: entry["busy"].as_bool().unwrap_or(false),
             input,
-            sending: false,
+sending: false,
+pending_command: None,
             notice: String::new(),
             revision: 0,
         });
@@ -260,6 +284,11 @@ impl Workspaces {
         };
         let text = {
             let detail = self.detail.as_ref().unwrap();
+            // A dispatch is already in flight: pressing Enter again must not
+            // queue the same message under a second command.
+            if detail.sending {
+                return;
+            }
             detail.input.read(cx).content.trim().to_string()
         };
         if text.is_empty() {
@@ -283,8 +312,22 @@ impl Workspaces {
             .and_then(|replica| replica.catalog.as_ref())
             .and_then(|catalog| catalog["sourceId"].as_str().map(str::to_owned))
             .unwrap_or_default();
+        // The command id is the idempotency key for this draft: retrying
+        // unchanged text after a lost receipt reuses it and the owner answers
+        // from memory; edited or cleared text is a new command.
+        let command_id = {
+            let detail = self.detail.as_mut().unwrap();
+            match &detail.pending_command {
+                Some((id, draft)) if *draft == text => id.clone(),
+                _ => {
+                    let id = monocode_core::mono::new_id();
+                    detail.pending_command = Some((id.clone(), text.clone()));
+                    id
+                }
+            }
+        };
         let command = json!({
-            "commandId": monocode_core::mono::new_id(),
+            "commandId": command_id,
             "environmentId": environment_id,
             "workspaceSourceId": source_id,
             "target": {"kind": "mono", "id": mono_id},
@@ -310,10 +353,14 @@ impl Workspaces {
                             detail.input.update(cx, |input, cx| {
                                 input.set_text(String::new(), cx)
                             });
+                            detail.pending_command = None;
                             detail.revision += 1;
                             detail.notice = String::new();
                             this.refresh_detail(cx);
                         } else {
+                            // failed/rejected/unknown are recorded outcomes:
+                            // resubmitting is a new command, not a retry.
+                            detail.pending_command = None;
                             let reason = receipt["result"]["error"]
                                 .as_str()
                                 .or_else(|| receipt["result"]["reason"].as_str())
@@ -321,6 +368,8 @@ impl Workspaces {
                             detail.notice = format!("Command {status}: {reason}");
                         }
                     }
+                    // Transport failure: nothing was recorded either way, so
+                    // the draft keeps its command id and Enter retries it.
                     Err(error) => detail.notice = error,
                 }
                 cx.notify();

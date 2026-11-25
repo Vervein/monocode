@@ -238,6 +238,9 @@ impl Shell {
             ));
             self.machines = Some(view);
         }
+        if let Some(view) = &self.machines {
+            view.update(cx, |view, cx| view.reload_machines(cx));
+        }
         self.show_app_view(AppView::Machines, window, cx);
     }
 
