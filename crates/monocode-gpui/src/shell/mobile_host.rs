@@ -1545,9 +1545,10 @@ impl Shell {
                                     .collect(),
                                 cx,
                             )
+                            .map(|_| ())
                         }),
                 });
-                let result = result.map(|()| json!({"sessionId": conversation}));
+                let result = result.map(|_| json!({"sessionId": conversation}));
                 this.schedule_mobile_push(cx);
                 finish(this, request, result);
             });

@@ -598,13 +598,19 @@ impl Monos {
         text: String,
         attachments: Vec<String>,
         cx: &mut Context<Self>,
-    ) -> Result<(), String> {
+    ) -> Result<String, String> {
         if self.roster.get(id).is_none() {
             return Err("Mono is no longer available".into());
         }
         self.ensure_chat(id, cx);
-        self.enqueue(id, text, attachments, false, cx);
-        Ok(())
+        Ok(self.enqueue(id, text, attachments, false, cx).unwrap_or_default())
+    }
+
+    /// Whether the roster write covering this message has reached disk.
+    /// The workspace command path uses it to tell "queued in memory" apart
+    /// from "queued durably" before it calls a receipt completed.
+    pub(crate) fn message_persisted(&self, message_id: &str) -> bool {
+        self.persisted_messages.contains(message_id)
     }
     pub(crate) fn account_changed(
         &mut self,
@@ -767,7 +773,7 @@ impl Monos {
                 this.observations.push(cx.subscribe(
                     &view,
                     move |this, _, event: &MonoSubmitted, cx| {
-                        this.enqueue(
+                        let _ = this.enqueue(
                             &source,
                             event.text.clone(),
                             event
@@ -777,7 +783,7 @@ impl Monos {
                                 .collect(),
                             false,
                             cx,
-                        )
+                        );
                     },
                 ));
                 let source = id.clone();
@@ -925,20 +931,21 @@ impl Monos {
         attachments: Vec<String>,
         internal: bool,
         cx: &mut Context<Self>,
-    ) {
-        if let Some(mono) = self.roster.get_mut(id) {
-            mono.outbox.push(Message {
-                id: mono::new_id(),
-                text,
-                sent_at: Some(monocode_core::time::now_ms()),
-                internal,
-                error: None,
-                attachments,
-            });
-            self.save(cx);
-            self.configure_chat(id, cx);
-            self.dispatch(id, cx);
-        }
+    ) -> Option<String> {
+        let mono = self.roster.get_mut(id)?;
+        let message_id = mono::new_id();
+        mono.outbox.push(Message {
+            id: message_id.clone(),
+            text,
+            sent_at: Some(monocode_core::time::now_ms()),
+            internal,
+            error: None,
+            attachments,
+        });
+        self.save(cx);
+        self.configure_chat(id, cx);
+        self.dispatch(id, cx);
+        Some(message_id)
     }
     fn dispatch(&mut self, id: &str, cx: &mut Context<Self>) {
         let delivered = self

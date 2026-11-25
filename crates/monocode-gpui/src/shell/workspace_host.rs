@@ -378,6 +378,63 @@ impl Shell {
         }
 
         let outcome = self.execute_workspace_command(&command, cx);
+        if let Ok(result) = &outcome
+            && command.action == "mono.send"
+        {
+            // completed means queued *durably*: the outbox write commits on
+            // a background task after the domain call returns, so answering
+            // now would let a crash in between lose a message the receipt
+            // claims was accepted. Hold the reply until the write lands;
+            // a retry in the meantime is answered by the accepted receipt.
+            let message_id = result["messageId"].as_str().unwrap_or_default().to_string();
+            let store = self.store.clone();
+            let signature = signature.clone();
+            let command_id = command.command_id.clone();
+            let owner_epoch = self.workspace_host.owner_epoch.clone();
+            let result = result.clone();
+            cx.spawn(async move |this, cx| {
+                let mut persisted = false;
+                for _ in 0..600 {
+                    cx.background_executor()
+                        .timer(std::time::Duration::from_millis(50))
+                        .await;
+                    persisted = this
+                        .update(cx, |shell, cx| {
+                            shell
+                                .monos
+                                .as_ref()
+                                .map(|monos| monos.read(cx).message_persisted(&message_id))
+                                .unwrap_or(false)
+                        })
+                        .unwrap_or(false);
+                    if persisted {
+                        break;
+                    }
+                }
+                let (status, result) = if persisted {
+                    ("completed", Some(result))
+                } else {
+                    (
+                        "unknown",
+                        Some(json!({"error": "Message did not reach disk in time; its outcome is unknown"})),
+                    )
+                };
+                let encoded = result.as_ref().map(|value| value.to_string());
+                if let Err(error) = locked(&store).and_then(|store| {
+                    store.save_workspace_receipt(&command_id, &signature, status, encoded.as_deref())
+                }) {
+                    return request.reply(Err(format!("Cannot record the outcome: {error}")));
+                }
+                request.reply(Ok(json!({
+                    "commandId": command_id,
+                    "status": status,
+                    "result": result,
+                    "ownerEpoch": owner_epoch,
+                })));
+            })
+            .detach();
+            return;
+        }
         let (status, result) = match outcome {
             Ok(result) => ("completed", Some(result)),
             Err(error) => ("failed", Some(json!({"error": error}))),
@@ -416,9 +473,10 @@ impl Shell {
                     .filter_map(Value::as_str)
                     .map(str::to_owned)
                     .collect();
-                monos.update(cx, |monos, cx| monos.mobile_send(&id, text, attachments, cx))?;
+                let message_id =
+                    monos.update(cx, |monos, cx| monos.mobile_send(&id, text, attachments, cx))?;
                 let session = monos.read(cx).roster.get(&id).and_then(|mono| mono.session_id);
-                Ok(json!({"queued": true, "monoId": id, "sessionId": session}))
+                Ok(json!({"queued": true, "monoId": id, "sessionId": session, "messageId": message_id}))
             }
             "mono.setProjects" => {
                 let id = command.target.id.clone();
