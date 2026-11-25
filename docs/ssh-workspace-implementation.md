@@ -101,3 +101,13 @@
 - Node 22 在 ~/.nvm/versions/node/v22.23.5,已 symlink /usr/local/bin/node
 - 构建依赖已装:libxkbcommon-x11-dev 等;sshd 运行中可 localhost loopback
 - 签名只由 owner(Rust)计算:canonical_json 递归排序键;host 仅透传不验签
+
+
+## 下一阶段:客户端集成(第2批C + 第1批 UI)入口指引
+
+未开始。续作第一步先读 shell.rs 的 connections/remote 现状:GPUI 客户端如何表示远程环境(remote.rs RemoteClient、features/connections TS 是 Tauri web 端遗留还是共用要分清)。关键决策点:
+1. GPUI 客户端侧 RemoteBackend 放哪:建议 crates/monocode-gpui/src/shell/ 下新建 remote_workspace.rs,经 RemoteClient 调 workspace.* RPC,按 catalog 渲染 monos/projects 作用域
+2. 主机选择器:导航条加 host picker,绑定 WorkspaceBindingKey{environmentId,workspaceSourceId},切换时整个 projects/monos 视图换 binding
+3. 远端 mono 页面必须走无调度副作用的 view model/backend adapter,禁止塞进本地 Monos::new()
+4. mobile 业务投影格式已兼容复用(catalog json 里 projects/monos/sessions 结构与手机端一致)
+5. 审批/取消 action 还没做:mobile host 里 conversation.approve/deny 的模式可参照,作为 mono.approval/session 级命令加入 dispatch
