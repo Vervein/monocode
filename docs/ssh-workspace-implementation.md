@@ -122,3 +122,24 @@
 - 端口随机化(4400+random 500),避免残留 host 进程占用端口后用错 store 应答(曾导致"Device credential is invalid or revoked"假象)
 - pair 必须先于 serve 执行:两者打开 store 都跑迁移,并发首次迁移会撞 "duplicate column" —— monocode host 既有竞态,非本次引入
 - mono.answerQuestion 语义:payload.requestId 必填,reply 省略=hold open(对应手机端 keepQuestionOpen)
+
+
+## 客户端 UI 垂直切片(2026-11-26,已 UI 端到端验证)
+
+**Machines 视图**(src/workspaces.rs + AppView::Machines):按用户认可的 mobile 模型实现——导航栏 Machines 入口 → 机器选择 → 该主机 workspace 的 Mono 卡片(名称/状态/颜色/最近消息)→ 详情页(只读历史 + composer)→ mono.send 命令闭环。全部数据经 workspace RPC,本地无调度副作用。
+
+**真实 UI 端到端验证(双实例本机)**:owner(种子 mono uimono001)+ host(:4520)+ client(种子 remote-machines.json 直连)。
+- catalog 同步:mono 卡片渲染,name/status/color/lastMessage 正确
+- 详情页历史:空历史提示正确,发消息后回读渲染(经 owner store 往返)
+- composer:Enter 发送 → 命令回执 completed → 输入框清空 → 历史刷新出气泡
+- 断连:kill host → 红色 unreachable 提示,已同步内容保留(不静默清空/回落)
+- 重连:host 恢复 → 提示消失,同一 mono 对象继续
+- 验证 harness:/home/ubuntu/ws-ui-setup.mjs 搭建环境;截图证据在 session artifacts
+
+**已知偏差与剩余(诚实清单)**:
+1. 主机选择器在 Machines 视图内(机器 pill 行),不是设计文档字面要求的全局导航条 scoping——现有本地侧边栏(项目栏/会话栏)未被按 host 重 scope。这是最大的剩余工程:本地 sidebar 深耦合 i64 session id 与本地 store,需要继续批次推进
+2. 远端 projects 只显示计数,未接入项目栏;mono 项目绑定在客户端只读
+3. 轮询同步(3s),无推送通道;transcript 渲染是简版(messages 气泡),无 turns/工具卡片/审批交互 UI(后端 action 已支持 mono.answerQuestion/mono.cancel)
+4. SSH 传输未端到端单测——验证用 loopback http 直连;workspace RPC 走既有 Connections::request(SSH tunnel 透明继承),但 install/pairing 流程未在本轮验证
+5. 第 4-6 批(打磨/Rust owner 抽离/发布)未开始,属文档定义的后续阶段
+6. monos.file(读写 SOUL/MEMORY)后端已通,客户端无 UI
