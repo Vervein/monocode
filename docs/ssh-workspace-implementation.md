@@ -143,3 +143,16 @@
 4. SSH 传输未端到端单测——验证用 loopback http 直连;workspace RPC 走既有 Connections::request(SSH tunnel 透明继承),但 install/pairing 流程未在本轮验证
 5. 第 4-6 批(打磨/Rust owner 抽离/发布)未开始,属文档定义的后续阶段
 6. monos.file(读写 SOUL/MEMORY)后端已通,客户端无 UI
+
+
+## Review 修复轮(2026-11-26,commit 9edd71f1/61936a32/f1d821f0)
+
+Devin Review 初审 6 项,5 项已修并回归(写路径 harness 22/22):
+1. mono.send 回执在 outbox 落盘前标记 completed → 改为延迟回执:mobile_send 返回消息 id,轮询 persisted 集合,超时记 unknown 而非 completed
+2. 客户端重发草稿用新 commandId 导致无法去重 → 草稿保留 commandId,传输失败重试复用;发送中禁止重复提交
+3. Settings 新增机器后 Machines 视图不刷新 → open_machines 每次重读连接列表
+4. host 侧 IPC 断线后 client 永久 broken 不再恢复 → 发现层淘汰 broken client 重建连接
+5. host 停机时 IPC socket 持有导致进程不退 → server close 事件关闭 workspace 连接
+6. 历史不可向前翻页 → escalated(简版 transcript 范围外,打磨批次决策)
+
+测试代理 UI 端到端(录制证据在 PR #1 评论):catalog/详情/首轮发送/断连/重连/返回/本地隔离全部 PASS;重连后第二条消息 receipt completed 且确认入 outbox,但因测试环境无 provider 首条消息阻塞,transcript 按设计只渲染 store 行故不可见——环境限制非缺陷。遗留观察:outbox 排队消息不进 transcript(打磨批次可评估 monos.history 投影是否含 pending)。
