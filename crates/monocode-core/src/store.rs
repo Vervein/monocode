@@ -220,6 +220,13 @@ impl Store {
 
     /// A workspace command receipt by its client-chosen id.
     pub fn workspace_receipt(&self, command_id: &str) -> Result<Option<(String, String, Option<String>)>, String> {
+        self.conn
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS workspace_receipts(command_id TEXT PRIMARY KEY,
+                 signature TEXT NOT NULL, status TEXT NOT NULL, result TEXT,
+                 created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);",
+            )
+            .map_err(|e| e.to_string())?;
         let found = self
             .conn
             .query_row(
@@ -244,6 +251,16 @@ impl Store {
         status: &str,
         result: Option<&str>,
     ) -> Result<(), String> {
+        // Created lazily rather than only in the opening batch: a store
+        // opened through the shared desktop schema never ran that batch, and
+        // receipts are small enough that the check costs nothing.
+        self.conn
+            .execute_batch(
+                "CREATE TABLE IF NOT EXISTS workspace_receipts(command_id TEXT PRIMARY KEY,
+                 signature TEXT NOT NULL, status TEXT NOT NULL, result TEXT,
+                 created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);",
+            )
+            .map_err(|e| e.to_string())?;
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_err(|e| e.to_string())?
