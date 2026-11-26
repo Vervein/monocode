@@ -730,6 +730,7 @@ fn workspace_history_page(saved: &Saved, limit: usize, before: &str) -> Result<R
             "turns": [],
             "busy": false,
             "older": false,
+            "conversationId": saved.id,
         })));
     }
     let snapshot = saved_snapshot(saved);
@@ -748,6 +749,7 @@ fn workspace_history_page(saved: &Saved, limit: usize, before: &str) -> Result<R
             "turns": turns::build(&source, start..end),
             "busy": false,
             "older": more || snapshot.history.is_some(),
+            "conversationId": saved.id,
         })));
     }
     let start = ids.len().saturating_sub(limit);
@@ -756,6 +758,7 @@ fn workspace_history_page(saved: &Saved, limit: usize, before: &str) -> Result<R
         "turns": turns::build(&source, start..ids.len()),
         "busy": false,
         "older": start > 0 || snapshot.history.is_some(),
+        "conversationId": saved.id,
     })))
 }
 

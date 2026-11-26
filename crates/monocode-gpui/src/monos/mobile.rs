@@ -44,6 +44,11 @@ impl Monos {
             s => s,
         }
         .to_string();
+        let live_busy = self
+            .chats
+            .get(&mono.id)
+            .is_some_and(|chat| chat.read(cx).busy)
+            || !busy.is_empty();
         // The dashboard's live line, word for word.
         let status = match (state.as_str(), busy.first()) {
             ("needs-you", _) => "Waiting for your input".to_string(),
@@ -113,6 +118,7 @@ impl Monos {
         Ok(json!({
             "status": status,
             "state": state,
+            "busy": live_busy,
             "contributions": {
                 "total": days.iter().map(Day::count).sum::<u32>(),
                 "streak": streak(&days),

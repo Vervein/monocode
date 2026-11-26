@@ -2389,7 +2389,7 @@ pub(super) fn older_page(
         let Some((start, mut built)) = turns else {
             // Before this page's first turn: the page above it, if any.
             let Some(above) = page.before else {
-                return Ok(json!({"turns": [], "older": false}));
+                return Ok(json!({"turns": [], "older": false, "conversationId": session}));
             };
             cursor = above;
             page = store.load_before(session, cursor, false)?;
@@ -2402,7 +2402,7 @@ pub(super) fn older_page(
                 turn["id"] = json!(id);
             }
         }
-        return Ok(json!({"turns": built, "older": start > 0 || page.before.is_some()}));
+        return Ok(json!({"turns": built, "older": start > 0 || page.before.is_some(), "conversationId": session}));
     }
 }
 

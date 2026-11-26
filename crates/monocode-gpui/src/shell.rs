@@ -6908,15 +6908,34 @@ impl Shell {
         self.projects_frame.update(cx, |_, cx| cx.notify());
         cx.notify();
     }
-    /// `Project: Previous/Next` along the project rail.
+    /// `Project: Previous/Next` along the same scoped order shown in the
+    /// project rail. Remote catalog entries follow the normal remote
+    /// registration path instead of being interpreted as local paths.
     fn step_project(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
         if self.menu.is_some() {
             return;
         }
-        let projects = self.workspace.visible_project_order();
-        if let Some(next) = adjacent(&projects, Some(&self.workspace.project), step)
-            && next != self.workspace.project
-        {
+        let projects = self.project_space_order();
+        if projects.is_empty() {
+            return;
+        }
+        let len = projects.len() as isize;
+        let ix = projects
+            .iter()
+            .position(|path| self.project_space_active(path))
+            .map(|ix| ix as isize)
+            .map_or(if step < 0 { len - 1 } else { 0 }, |ix| {
+                (ix + step.signum()).rem_euclid(len)
+            }) as usize;
+        let next = projects[ix].clone();
+        if self.project_space_active(&next) {
+            return;
+        }
+        if self.remote_workspaces.selected.is_some() {
+            if let Some((machine_id, entry)) = self.remote_project_entry_by_path(&next) {
+                self.open_remote_workspace_project(machine_id, entry, cx);
+            }
+        } else {
             self.select_project(next, window, cx);
         }
     }
@@ -7215,6 +7234,15 @@ impl Shell {
             .collect()
     }
 
+    fn project_space_order(&self) -> Vec<String> {
+        let paths = self.project_space_paths();
+        if self.remote_workspaces.selected.is_some() {
+            paths
+        } else {
+            self.space_reorder.order(&paths)
+        }
+    }
+
     fn remote_project_entry_by_path(&self, path: &str) -> Option<(String, serde_json::Value)> {
         let machine_id = self.remote_workspaces.selected.clone()?;
         let catalog = self.remote_workspace_catalog(&machine_id)?;
@@ -7245,11 +7273,7 @@ impl Shell {
         let last = paths.len().saturating_sub(shown);
         self.spaces_start = self.spaces_start.min(last);
         let first = self.spaces_start;
-        let ordered = if remote_scope {
-            paths
-        } else {
-            self.space_reorder.order(&paths)
-        };
+        let ordered = self.project_space_order();
         let projects: Vec<_> = ordered
             .into_iter()
             .enumerate()

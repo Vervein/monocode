@@ -428,9 +428,7 @@ impl Shell {
                 let machine_id = machine_id.clone();
                 let id = id.clone();
                 view.update(cx, |view, cx| {
-                    if view.open_detail_key() == Some((machine_id, id)) {
-                        view.close_detail(cx);
-                    }
+                    view.close_detail_key(&machine_id, &id, cx);
                 });
             }
             if let TitleTab::Session(id) = tab {

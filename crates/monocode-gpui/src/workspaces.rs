@@ -39,6 +39,7 @@ struct Replica {
 
 struct MonoDetail {
     id: String,
+    machine: String,
     name: String,
     color: String,
     profile: Option<Value>,
@@ -53,6 +54,10 @@ struct MonoDetail {
     /// the newest page always has older rows relative to itself, even after the
     /// user already paged back to the beginning.
     paged: bool,
+    /// The owner conversation these cached turns belong to. Resetting a Mono
+    /// keeps its Mono id but starts a new conversation, so row-local turn ids
+    /// are only meaningful under this identity.
+    conversation: Option<i64>,
     busy: bool,
     input: Entity<Input>,
     sending: bool,
@@ -79,6 +84,9 @@ pub(crate) struct Workspaces {
     selected: Option<String>,
     replicas: HashMap<String, Replica>,
     detail: Option<MonoDetail>,
+    /// Inactive remote details keyed by machine and owner Mono identity. Tab
+    /// activation swaps these in and out; only an explicit close drops one.
+    details: HashMap<(String, String), MonoDetail>,
     _events: Vec<Subscription>,
 }
 
@@ -99,6 +107,7 @@ impl Workspaces {
             selected: None,
             replicas: HashMap::new(),
             detail: None,
+            details: HashMap::new(),
             _events: Vec::new(),
         };
         // Single-machine users should never have to make the only possible
@@ -116,6 +125,9 @@ impl Workspaces {
         self.machines = self.remote.list().unwrap_or_default();
         self.replicas
             .retain(|id, _| self.machines.iter().any(|machine| &machine.id == id));
+        self.details.retain(|(machine_id, _), _| {
+            self.machines.iter().any(|machine| &machine.id == machine_id)
+        });
         if let Some(selected) = self.selected.clone()
             && !self.machines.iter().any(|machine| machine.id == selected)
         {
@@ -129,9 +141,17 @@ impl Workspaces {
         cx.notify();
     }
 
+    fn stash_detail(&mut self) {
+        if let (Some(machine_id), Some(detail)) = (self.selected.clone(), self.detail.take()) {
+            self.details.insert((machine_id, detail.id.clone()), detail);
+        }
+    }
+
     fn select(&mut self, machine_id: String, cx: &mut Context<Self>) {
+        if self.selected.as_deref() != Some(machine_id.as_str()) {
+            self.stash_detail();
+        }
         self.selected = Some(machine_id.clone());
-        self.detail = None;
         self.start_sync(machine_id, cx);
         cx.notify();
     }
@@ -145,9 +165,27 @@ impl Workspaces {
     /// Returns the Machines surface to its catalog without touching the remote
     /// workspace. Closing a detail is view state only, never a cancel command.
     pub(crate) fn close_detail(&mut self, cx: &mut Context<Self>) {
-        if self.detail.take().is_some() {
+        if let (Some(machine_id), Some(detail)) = (self.selected.clone(), self.detail.take()) {
+            self.details.remove(&(machine_id, detail.id));
             cx.notify();
         }
+    }
+
+    /// Drops one detail whether it is currently active or parked behind the
+    /// catalog/another tab. Explicit tab close is different from activation.
+    pub(crate) fn close_detail_key(&mut self, machine_id: &str, id: &str, cx: &mut Context<Self>) {
+        self.details.remove(&(machine_id.to_string(), id.to_string()));
+        if self.open_detail_key() == Some((machine_id.to_string(), id.to_string())) {
+            self.detail = None;
+        }
+        cx.notify();
+    }
+
+    /// Shows the catalog without discarding inactive detail state. This is
+    /// tab activation, not closing the remote object.
+    pub(crate) fn show_catalog(&mut self, cx: &mut Context<Self>) {
+        self.stash_detail();
+        cx.notify();
     }
 
     /// Opens a catalog entry chosen from the shell's host-scoped navigation.
@@ -232,36 +270,45 @@ impl Workspaces {
         if id.is_empty() {
             return;
         }
-        let input = cx.new(|cx| {
-            input::Input::field(
-                "Message the Mono",
-                "Ask it to do something…",
-                content(0.35),
-                cx,
-            )
-        });
-        self._events
-            .push(cx.subscribe(&input, |this, _, _: &input::Submitted, cx| this.send(cx)));
-        self.detail = Some(MonoDetail {
-            name: entry["name"].as_str().unwrap_or("Mono").to_string(),
-            color: entry["color"].as_str().unwrap_or("#888888").to_string(),
-            id: id.clone(),
-            profile: None,
-            turns: Vec::new(),
-            older: false,
-            loading_older: false,
-            paged: false,
-            busy: entry["busy"].as_bool().unwrap_or(false),
-            input,
-            sending: false,
-            acting: false,
-            question_request: None,
-            question_answers: HashMap::new(),
-            question_custom: HashMap::new(),
-            pending_command: None,
-            notice: String::new(),
-            revision: 0,
-        });
+        self.stash_detail();
+        let machine_id = self.selected.clone().unwrap();
+        if let Some(saved) = self.details.remove(&(machine_id.clone(), id.clone())) {
+            self.detail = Some(saved);
+        } else {
+            let input = cx.new(|cx| {
+                input::Input::field(
+                    "Message the Mono",
+                    "Ask it to do something…",
+                    content(0.35),
+                    cx,
+                )
+            });
+            self._events.push(
+                cx.subscribe(&input, |this, _, _: &input::Submitted, cx| this.send(cx)),
+            );
+            self.detail = Some(MonoDetail {
+                name: entry["name"].as_str().unwrap_or("Mono").to_string(),
+                color: entry["color"].as_str().unwrap_or("#888888").to_string(),
+                id: id.clone(),
+                machine: machine_id.clone(),
+                profile: None,
+                turns: Vec::new(),
+                older: false,
+                loading_older: false,
+                paged: false,
+                conversation: None,
+                busy: entry["busy"].as_bool().unwrap_or(false),
+                input,
+                sending: false,
+                acting: false,
+                question_request: None,
+                question_answers: HashMap::new(),
+                question_custom: HashMap::new(),
+                pending_command: None,
+                notice: String::new(),
+                revision: 0,
+            });
+        }
         self.refresh_detail(cx);
         // While the detail is open, refresh its transcript on the same
         // cadence as the catalog; closing it stops the loop.
@@ -271,7 +318,9 @@ impl Workspaces {
                 cx.background_executor().timer(POLL).await;
                 let alive = this
                     .update(cx, |this, cx| {
-                        if this.detail.as_ref().is_some_and(|detail| detail.id == id) {
+                        if this.detail.as_ref().is_some_and(|detail| {
+                            detail.id == id && detail.machine == machine_id
+                        }) {
                             this.refresh_detail(cx);
                             true
                         } else {
@@ -320,9 +369,16 @@ impl Workspaces {
                 }
                 match history {
                     Ok(page) => {
+                        let conversation = page["conversationId"].as_i64();
+                        if conversation != detail.conversation {
+                            if detail.conversation.is_some() {
+                                detail.turns.clear();
+                                detail.paged = false;
+                            }
+                            detail.conversation = conversation;
+                        }
                         let incoming = page["turns"].as_array().cloned().unwrap_or_default();
                         merge_latest_turns(&mut detail.turns, incoming);
-                        detail.busy = page["busy"].as_bool().unwrap_or(false);
                         if !detail.paged {
                             detail.older = page["older"].as_bool().unwrap_or(false);
                         }
@@ -337,6 +393,9 @@ impl Workspaces {
                     detail.question_request = question_request;
                     detail.question_answers.clear();
                     detail.question_custom.clear();
+                }
+                if let Some(profile) = profile.as_ref() {
+                    detail.busy = profile["busy"].as_bool().unwrap_or(false);
                 }
                 detail.profile = profile;
                 cx.notify();
@@ -392,12 +451,15 @@ impl Workspaces {
                 detail.loading_older = false;
                 match outcome {
                     Ok(page) => {
-                        let incoming = page["turns"].as_array().cloned().unwrap_or_default();
-                        insert_older_turns(&mut detail.turns, &request_before, incoming);
-                        detail.older = page["older"].as_bool().unwrap_or(false);
-                        detail.paged = true;
-                        detail.busy = page["busy"].as_bool().unwrap_or(detail.busy);
-                        detail.notice = String::new();
+                        if page["conversationId"].as_i64() != detail.conversation {
+                            detail.notice = "The conversation changed while older messages were loading".into();
+                        } else {
+                            let incoming = page["turns"].as_array().cloned().unwrap_or_default();
+                            insert_older_turns(&mut detail.turns, &request_before, incoming);
+                            detail.older = page["older"].as_bool().unwrap_or(false);
+                            detail.paged = true;
+                            detail.notice = String::new();
+                        }
                     }
                     Err(error) => detail.notice = error,
                 }
@@ -1701,7 +1763,8 @@ mod tests {
                         "monos.history" => json!({"result":{
                             "turns":[],
                             "older":false,
-                            "busy":state.busy
+                            "busy":state.busy,
+                            "conversationId":1
                         }}),
                         "monos.profile" => {
                             let approvals = if state.approval {
@@ -1732,6 +1795,7 @@ mod tests {
                             };
                             json!({"result":{
                                 "status":"working",
+                                "busy":state.busy,
                                 "interaction":{"waiting":true,"approvals":approvals,"question":question}
                             }})
                         }

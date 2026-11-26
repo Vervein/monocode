@@ -35,6 +35,7 @@ enum Row {
     ClassicGap(usize),
     Empty,
     RemoteEmpty,
+    RemoteProjectSelection,
 }
 
 pub(super) struct SidebarList {
@@ -245,11 +246,14 @@ impl Shell {
             {
                 self.sidebar_list.structural_rebuilds += 1;
             }
-            if self.remote_workspaces.selected.is_some() {
+            let remote_project_sessions = self.workspace.classic_layout
+                && self.remote_workspaces.selected.is_some()
+                && self.active_project_in_selected_workspace();
+            if self.remote_workspaces.selected.is_some() && !remote_project_sessions {
                 // A remote host scope is not a filtered view of local sessions:
-                // its rows come from the owner catalog and open through workspace
-                // commands. Keep local session structures intact underneath, but
-                // never interleave them with the remote view.
+                // Focused rows come from the owner catalog and open through workspace
+                // commands. Classic, however, is project-scoped; it only uses the
+                // ordinary session list when the active project belongs to this host.
                 self.session_row_bounds.clear();
                 self.folder_bounds.clear();
                 self.prepare_remote_sidebar_list();
@@ -297,11 +301,32 @@ impl Shell {
         )
     }
 
-    /// Focused navigation in a remote host scope: catalog Monos as remote rows,
-    /// never local sessions re-labelled as remote ones. The row renderer reads
-    /// the live replica again so status and preview updates do not require a
-    /// structural rebuild.
+    fn active_project_in_selected_workspace(&self) -> bool {
+        let Some((_, replica)) = self.selected_workspace_replica() else {
+            return false;
+        };
+        let prefix = format!("remote://{}/", replica.environment_id);
+        self.workspace.project.starts_with(&prefix)
+    }
+
+    /// Remote navigation outside an active host project. Focused shows catalog
+    /// Monos; Classic remains project-scoped and asks for a host project instead
+    /// of borrowing local rows or flattening host-wide Monos into Sessions.
     fn prepare_remote_sidebar_list(&mut self) {
+        if self.workspace.classic_layout {
+            self.sidebar_list.update(
+                self.sidebar_scope(),
+                vec![
+                    Row::Navigation,
+                    Row::Heading {
+                        label: "Sessions",
+                        first: true,
+                    },
+                    Row::RemoteProjectSelection,
+                ],
+            );
+            return;
+        }
         let catalog = self
             .selected_workspace_replica()
             .filter(|(_, replica)| replica.usable())
@@ -622,6 +647,13 @@ impl Shell {
                 } else {
                     "No matching remote Monos"
                 })
+                .into_any(),
+            Row::RemoteProjectSelection => div()
+                .px_2()
+                .py_2()
+                .text_size(px(12.))
+                .text_color(rgb(MUTED))
+                .child("Select a project on this host to see its sessions")
                 .into_any(),
         };
         div()

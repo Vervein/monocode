@@ -217,3 +217,11 @@ Focused title tab 已有最小安全切片:
 - 自审并修复远程命令竞态:send/approval/question/cancel 在飞行途中若用户切换 detail,回调不再写入新 detail。
 - 测试平台修正扩大到 settings/pinned tabs/terminal panes 的 shell 快捷键模拟:Linux 使用 ctrl,macOS 使用 cmd;不改产品行为。
 - clippy 仍在后台运行,尚无最终结论。所有代码仍未 commit/push。
+
+## Review 修正:远程标签状态、会话身份与作用域边界(2026-11-26,编译验证)
+
+- Remote Mono detail 现在按 `(machine, mono)` 暂存/恢复完整视图状态;切换 Machines catalog 或 remote Mono tab 不再丢弃 composer 草稿、pending command、问题表单和分页状态,显式关闭 tab 才丢弃。
+- Owner history 响应携带 `conversationId`;客户端缓存按会话身份合并,Mono reset/新会话后会清空旧 transcript,跨页加载也会拒绝过期身份的回答。
+- `monos.profile` 投影 live `busy`,remote Cancel 是否可见由 owner 实时状态决定,不再被历史页的静态 `busy:false` 覆盖。
+- 项目前进/后退快捷键和底部 space 拖拽都改用当前 Host scope 的可见项目顺序;本地拖拽在保存时把可见顺序映回完整项目列表,隐藏的 `remote://` 项目不再造成索引偏移。
+- Classic 的 Sessions 保持项目作用域: active project 属于所选 host 时使用该项目同步来的 session rows;否则提示先选择该 host 的项目。Focused 仍显示 host-wide owner Monos。

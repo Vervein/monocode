@@ -398,7 +398,8 @@ impl Shell {
                 view.reload_machines(cx);
                 // The catalog tab and each remote-Mono detail tab are separate
                 // destinations even though one view implements both surfaces.
-                view.close_detail(cx);
+                // Activating the catalog must not close a detail tab's state.
+                view.show_catalog(cx);
             });
         }
         self.show_app_view(AppView::Machines, window, cx);
