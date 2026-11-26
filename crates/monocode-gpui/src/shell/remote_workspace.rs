@@ -184,19 +184,34 @@ impl Shell {
             return entries;
         };
         let prefix = format!("remote://{environment_id}");
+        let saved = locked(&self.store)
+            .ok()
+            .and_then(|store| store.remote_projects().ok())
+            .unwrap_or_default();
         for key in &self.workspace.projects {
             let Some(path) = key.strip_prefix(&prefix) else {
                 continue;
             };
-            if !path.starts_with('/')
-                || entries.iter().any(|entry| entry["path"].as_str() == Some(path))
-            {
+            if !path.starts_with('/') {
                 continue;
             }
-            let name = path.rsplit('/').next().unwrap_or(path);
+            let cwd = saved
+                .get(key)
+                .filter(|project| project.environment_id == environment_id)
+                .map(|project| project.cwd.as_str())
+                .unwrap_or(path);
+            if entries.iter().any(|entry| {
+                entry["path"].as_str() == Some(path) || entry["path"].as_str() == Some(cwd)
+            }) {
+                continue;
+            }
+            let name = cwd.rsplit('/').next().unwrap_or(cwd);
             entries.push(json!({
                 "id": format!("saved:{path}"),
+                // `path` is the normalized navigation identity; `cwd` is the
+                // literal host directory preserved in the saved project record.
                 "path": path,
+                "cwd": cwd,
                 "name": name,
                 "branch": "",
             }));
@@ -250,7 +265,11 @@ impl Shell {
         entry: Value,
         cx: &mut Context<Self>,
     ) {
-        let Some(path) = entry["path"].as_str().map(str::to_owned) else {
+        let Some(path) = entry["cwd"]
+            .as_str()
+            .or_else(|| entry["path"].as_str())
+            .map(str::to_owned)
+        else {
             return;
         };
         let environment_id = self

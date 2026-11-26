@@ -7258,14 +7258,11 @@ impl Shell {
     }
 
     fn project_space_active(&self, path: &str) -> bool {
-        if self.workspace.project == path {
-            return true;
+        if let Some((_, replica)) = self.selected_workspace_replica() {
+            let prefix = format!("remote://{}", replica.environment_id);
+            return self.workspace.project.strip_prefix(&prefix) == Some(path);
         }
-        let Some((_, replica)) = self.selected_workspace_replica() else {
-            return false;
-        };
-        let prefix = format!("remote://{}", replica.environment_id);
-        self.workspace.project.strip_prefix(&prefix) == Some(path)
+        self.workspace.project == path
     }
 
     fn project_spaces(&mut self, cx: &mut Context<Self>) -> AnyElement {

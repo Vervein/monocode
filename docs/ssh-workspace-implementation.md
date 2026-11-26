@@ -236,3 +236,8 @@ Focused title tab 已有最小安全切片:
 
 - Classic 本地 rail、项目移动菜单和键盘 Previous/Next 统一只使用 local-visible projects;隐藏的 `remote://` 存档不再成为移动目标或快捷键目标。
 - Host scope 的项目列表由 owner catalog projects 加上该 environment 已保存的 client remote folders 组成,按 path 去重;catalog 未收录但用户曾打开的 host folder 仍能回到 rail/底部项目条。
+
+## Review 修正第四轮:saved folder 原始路径与 active 身份(2026-11-26,编译验证)
+
+- Host scope 中 client-remembered folder 使用 store 里的原始 `cwd` 发 `projects.open`,normalized `remote://` key 只作导航身份;Unix 目录名里的字面反斜杠不会被改写成 slash 后重新打开。
+- `project_space_active` 在 remote scope 只比较 environment-qualified key,避免本地 `/same/path` 被误判为远端 `/same/path` 已打开。
