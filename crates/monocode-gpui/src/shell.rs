@@ -6916,7 +6916,11 @@ impl Shell {
             return;
         }
         let projects = if self.workspace.classic_layout && self.remote_workspaces.selected.is_none() {
-            self.workspace.visible_project_order()
+            self.workspace
+                .visible_project_order()
+                .into_iter()
+                .filter(|path| !path.starts_with("remote://"))
+                .collect()
         } else {
             self.project_space_order()
         };
