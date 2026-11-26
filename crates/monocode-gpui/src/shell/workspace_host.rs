@@ -3,10 +3,11 @@
 //! domain handlers so a remote desktop sees exactly what a paired phone sees,
 //! without the phone pairing transport.
 use super::mobile_host::{
-    PageLook, Saved, Target, assemble_catalog, older_page, page_turn, saved_snapshot, string,
+    PageLook, Read, Saved, Target, assemble_catalog, older_page, page_turn, saved_snapshot, string,
 };
 use super::*;
 use crate::mobile::transcript as turns;
+use monocode_core::mobile::watch;
 use monocode_core::workspace_ipc::{WorkspaceIpc, WorkspaceIpcEvent, WorkspaceIpcRequest};
 use monocode_core::workspace_protocol::{CatalogPage, capabilities};
 use serde_json::{Value, json};
@@ -14,24 +15,13 @@ use serde_json::{Value, json};
 const READ_TURNS: usize = 30;
 const MAX_PAGE: usize = 100;
 
+#[derive(Default)]
 pub(super) struct Workspace {
     pub(super) ipc: Option<WorkspaceIpc>,
     pub(super) source_id: String,
     pub(super) owner_epoch: String,
     pub(super) catalog_revision: u64,
     pub(super) catalog_hash: String,
-}
-
-impl Default for Workspace {
-    fn default() -> Self {
-        Self {
-            ipc: None,
-            source_id: String::new(),
-            owner_epoch: String::new(),
-            catalog_revision: 0,
-            catalog_hash: String::new(),
-        }
-    }
 }
 
 impl Shell {
@@ -158,7 +148,11 @@ impl Shell {
     /// Wraps the shared projection in the workspace envelope, moves external
     /// references out of the operable lists, and maintains the revision used
     /// by `workspace.changes`.
-    fn workspace_catalog_page(&mut self, mut payload: Value, cx: &mut App) -> Result<Value, String> {
+    fn workspace_catalog_page(
+        &mut self,
+        mut payload: Value,
+        cx: &mut App,
+    ) -> Result<Value, String> {
         let _ = cx;
         let mut externals: Vec<Value> = Vec::new();
         let mut operable_projects: Vec<Value> = Vec::new();
@@ -243,7 +237,10 @@ impl Shell {
     /// nobody polled the catalog meanwhile.
     fn workspace_changes(&mut self, request: WorkspaceIpcRequest, cx: &mut Context<Self>) {
         let since_revision = request.params["sinceRevision"].as_u64().unwrap_or(0);
-        let since_epoch = request.params["ownerEpoch"].as_str().unwrap_or_default().to_string();
+        let since_epoch = request.params["ownerEpoch"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
         let inputs = self.catalog_inputs(cx);
         let store = self.store.clone();
         let work = cx
@@ -252,17 +249,17 @@ impl Shell {
         cx.spawn(async move |this, cx| {
             let outcome = work.await;
             let answer = match this.update(cx, |this, cx| {
-                outcome.and_then(|(payload, ids, previews)| {
+                outcome.map(|(payload, ids, previews)| {
                     this.mobile.ids = ids;
                     this.mobile.mono_previews = previews;
                     let _ = this.workspace_catalog_page(payload, cx);
                     let epoch = this.workspace_host.owner_epoch.clone();
                     let revision = this.workspace_host.catalog_revision;
-                    Ok::<_, String>(if since_epoch != epoch || since_revision != revision {
+                    if since_epoch != epoch || since_revision != revision {
                         json!({"kind": "reset", "catalogRevision": revision, "ownerEpoch": epoch})
                     } else {
                         json!({"kind": "unchanged", "catalogRevision": revision})
-                    })
+                    }
                 })
             }) {
                 Ok(answer) => answer,
@@ -323,7 +320,9 @@ impl Shell {
         let command: monocode_core::workspace_protocol::WorkspaceCommand =
             match serde_json::from_value(request.params["command"].clone()) {
                 Ok(command) => command,
-                Err(error) => return request.reply(Err(format!("Invalid command envelope: {error}"))),
+                Err(error) => {
+                    return request.reply(Err(format!("Invalid command envelope: {error}")));
+                }
             };
         let owner_epoch = self.workspace_host.owner_epoch.clone();
         let command_id = command.command_id.clone();
@@ -355,7 +354,8 @@ impl Shell {
             )));
         }
         let signature = monocode_core::workspace_protocol::command_signature(&command);
-        let existing = locked(&self.store).and_then(|store| store.workspace_receipt(&command.command_id));
+        let existing =
+            locked(&self.store).and_then(|store| store.workspace_receipt(&command.command_id));
         match existing {
             Ok(Some((stored_signature, status, result))) => {
                 if stored_signature == signature {
@@ -371,9 +371,9 @@ impl Shell {
             Ok(None) => {}
             Err(error) => return request.reply(Err(format!("Cannot read receipts: {error}"))),
         }
-        if let Err(error) = locked(&self.store)
-            .and_then(|store| store.save_workspace_receipt(&command.command_id, &signature, "accepted", None))
-        {
+        if let Err(error) = locked(&self.store).and_then(|store| {
+            store.save_workspace_receipt(&command.command_id, &signature, "accepted", None)
+        }) {
             return request.reply(Err(format!("Cannot record the command: {error}")));
         }
 
@@ -441,7 +441,12 @@ impl Shell {
         };
         let encoded = result.as_ref().map(|value| value.to_string());
         if let Err(error) = locked(&self.store).and_then(|store| {
-            store.save_workspace_receipt(&command.command_id, &signature, status, encoded.as_deref())
+            store.save_workspace_receipt(
+                &command.command_id,
+                &signature,
+                status,
+                encoded.as_deref(),
+            )
         }) {
             return request.reply(Err(format!("Cannot record the outcome: {error}")));
         }
@@ -462,7 +467,10 @@ impl Shell {
         match command.action.as_str() {
             "mono.send" => {
                 let id = command.target.id.clone();
-                let text = command.payload["text"].as_str().unwrap_or_default().to_string();
+                let text = command.payload["text"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string();
                 if text.is_empty() {
                     return Err("mono.send requires payload.text".into());
                 }
@@ -473,10 +481,17 @@ impl Shell {
                     .filter_map(Value::as_str)
                     .map(str::to_owned)
                     .collect();
-                let message_id =
-                    monos.update(cx, |monos, cx| monos.mobile_send(&id, text, attachments, cx))?;
-                let session = monos.read(cx).roster.get(&id).and_then(|mono| mono.session_id);
-                Ok(json!({"queued": true, "monoId": id, "sessionId": session, "messageId": message_id}))
+                let message_id = monos.update(cx, |monos, cx| {
+                    monos.mobile_send(&id, text, attachments, cx)
+                })?;
+                let session = monos
+                    .read(cx)
+                    .roster
+                    .get(&id)
+                    .and_then(|mono| mono.session_id);
+                Ok(
+                    json!({"queued": true, "monoId": id, "sessionId": session, "messageId": message_id}),
+                )
             }
             "mono.setProjects" => {
                 let id = command.target.id.clone();
@@ -533,6 +548,33 @@ impl Shell {
                 }
                 Ok(json!({"monoId": id, "cancelled": cancelled}))
             }
+            "mono.decideApproval" => {
+                let id = command.target.id.clone();
+                let request_id = command.payload["requestId"]
+                    .as_str()
+                    .ok_or("mono.decideApproval requires payload.requestId")?;
+                let decision = match command.payload["decision"].as_str() {
+                    Some("allow") => monocode_core::agent::Decision::Allow,
+                    Some("session") => monocode_core::agent::Decision::Session,
+                    Some("deny") => monocode_core::agent::Decision::Deny,
+                    _ => {
+                        return Err(
+                            "mono.decideApproval requires decision allow, session or deny".into(),
+                        );
+                    }
+                };
+                let chat = monos
+                    .read(cx)
+                    .open_chat(&id)
+                    .ok_or("This approval was already resolved")?;
+                let decided = chat.update(cx, |chat, cx| {
+                    chat.decide_notification_request(request_id, decision, cx)
+                });
+                if !decided {
+                    return Err("This approval was already resolved".into());
+                }
+                Ok(json!({"monoId": id, "decided": true}))
+            }
             "mono.answerQuestion" => {
                 let id = command.target.id.clone();
                 let request_id = command.payload["requestId"]
@@ -573,7 +615,8 @@ impl Shell {
             for id in &ids {
                 match store.workspace_receipt(id)? {
                     Some((_, status, result)) => {
-                        let result = result.and_then(|text| serde_json::from_str::<Value>(&text).ok());
+                        let result =
+                            result.and_then(|text| serde_json::from_str::<Value>(&text).ok());
                         receipts.push(json!({
                             "commandId": id,
                             "status": status,
@@ -599,7 +642,9 @@ impl Shell {
         let id = string(&request.params, "monoId").unwrap_or_default();
         let target = Target::Mono(id);
         let before = string(&request.params, "before").unwrap_or_default();
-        let limit = (request.params["limit"].as_u64().unwrap_or(READ_TURNS as u64) as usize)
+        let limit = (request.params["limit"]
+            .as_u64()
+            .unwrap_or(READ_TURNS as u64) as usize)
             .clamp(1, MAX_PAGE);
         if !before.is_empty()
             && let Some((cursor, at)) = page_turn(&before)
@@ -608,12 +653,22 @@ impl Shell {
             return;
         }
         let load = self.load_saved(&target, cx);
-        cx.spawn(async move |_, _| {
-            let answer = match load.await {
-                Ok(saved) => workspace_history_page(&saved, limit),
-                Err(error) => Err(error),
-            };
-            request.reply(answer);
+        cx.spawn(async move |this, cx| {
+            match load
+                .await
+                .and_then(|saved| workspace_history_page(&saved, limit, &before))
+            {
+                Ok(Read::Done(value)) => request.reply(Ok(value)),
+                // The requested turn is the first one in the loaded window and
+                // the store says there are rows above it: cross the window
+                // boundary instead of repeating the newest page.
+                Ok(Read::Page(cursor)) => {
+                    let _ = this.update(cx, |this, cx| {
+                        this.workspace_older_page(request, &target, cursor, None, limit, cx)
+                    });
+                }
+                Err(error) => request.reply(Err(error)),
+            }
         })
         .detach();
     }
@@ -634,7 +689,10 @@ impl Shell {
                     let mono = m.read(cx).roster.get(mono)?;
                     Some((mono.session_id, mono.label()))
                 });
-                (found.as_ref().and_then(|found| found.0), found.map(|found| found.1))
+                (
+                    found.as_ref().and_then(|found| found.0),
+                    found.map(|found| found.1),
+                )
             }
         };
         let Some(session) = session else {
@@ -645,7 +703,10 @@ impl Shell {
             mono: name,
             launches: self.mobile_launches(target, cx),
             cwd: summary.as_ref().map(|s| s.cwd.clone()).unwrap_or_default(),
-            harness: summary.as_ref().map(|s| s.provider.clone()).unwrap_or_default(),
+            harness: summary
+                .as_ref()
+                .map(|s| s.provider.clone())
+                .unwrap_or_default(),
             model: None,
         };
         let store = self.store.clone();
@@ -658,25 +719,123 @@ impl Shell {
     }
 }
 
-/// The first page of a Mono's stored conversation, projected exactly as the
-/// mobile read projects it; empty for a Mono that has not talked yet.
-fn workspace_history_page(saved: &Saved, limit: usize) -> Result<Value, String> {
+/// The first page of a Mono's stored conversation, or turns before one the
+/// client already has. The projection is exactly the mobile read's; crossing
+/// from the loaded window into the store is reported as `Read::Page` so the
+/// caller can continue there instead of repeating the newest page.
+fn workspace_history_page(saved: &Saved, limit: usize, before: &str) -> Result<Read, String> {
     if saved.rows.is_empty() && saved.id == 0 {
-        return Ok(json!({
+        return Ok(Read::Done(json!({
             "messages": [],
             "turns": [],
             "busy": false,
             "older": false,
-        }));
+        })));
     }
     let snapshot = saved_snapshot(saved);
     let source = snapshot.source();
     let ids = turns::turn_ids(&source);
+    if !before.is_empty() {
+        let (start, end, more) = watch::before(&ids, before, limit)?;
+        // At the top of the loaded rows, a long conversation continues in the
+        // store page above them.
+        if start == end
+            && let Some(cursor) = snapshot.history
+        {
+            return Ok(Read::Page(cursor));
+        }
+        return Ok(Read::Done(json!({
+            "turns": turns::build(&source, start..end),
+            "busy": false,
+            "older": more || snapshot.history.is_some(),
+        })));
+    }
     let start = ids.len().saturating_sub(limit);
-    Ok(json!({
+    Ok(Read::Done(json!({
         "messages": turns::messages(snapshot.rows),
         "turns": turns::build(&source, start..ids.len()),
         "busy": false,
         "older": start > 0 || snapshot.history.is_some(),
-    }))
+    })))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use monocode_core::{agent::Settings, transcript::Row};
+    use std::collections::HashMap;
+
+    fn row(role: &str, text: &str) -> Row {
+        Row {
+            role: role.into(),
+            text: text.into(),
+            first: true,
+            sent_at: None,
+        }
+    }
+
+    fn saved(rows: Vec<Row>, history: Option<i64>) -> Saved {
+        Saved {
+            id: 1,
+            settings: Settings::default(),
+            rows,
+            harness: "claude".into(),
+            cwd: "/repo".into(),
+            history,
+            mono: Some("Ada".into()),
+            launches: HashMap::new(),
+        }
+    }
+
+    fn conversation() -> Vec<Row> {
+        vec![
+            row("user", "one"),
+            row("assistant", "answer one"),
+            row("user", "two"),
+            row("assistant", "answer two"),
+            row("user", "three"),
+            row("assistant", "answer three"),
+            row("user", "four"),
+            row("assistant", "answer four"),
+        ]
+    }
+
+    fn ids(page: &Value) -> Vec<&str> {
+        page["turns"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|turn| turn["id"].as_str().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn workspace_history_pages_inside_the_loaded_window() {
+        let saved = saved(conversation(), None);
+        let Ok(Read::Done(first)) = workspace_history_page(&saved, 2, "") else {
+            panic!("initial read should be a page");
+        };
+        assert_eq!(ids(&first), ["t4", "t6"]);
+        assert_eq!(first["older"], true);
+
+        let Ok(Read::Done(older)) = workspace_history_page(&saved, 2, "t4") else {
+            panic!("window paging should answer directly");
+        };
+        assert_eq!(ids(&older), ["t0", "t2"]);
+        assert_eq!(older["older"], false);
+    }
+
+    #[test]
+    fn workspace_history_crosses_from_the_window_top_into_store_pages() {
+        let with_history = saved(conversation(), Some(42));
+        let read = workspace_history_page(&with_history, 2, "t0").unwrap();
+        assert!(matches!(read, Read::Page(42)));
+
+        let without_history = saved(conversation(), None);
+        let Ok(Read::Done(empty)) = workspace_history_page(&without_history, 2, "t0") else {
+            panic!("a window with no store history should end honestly");
+        };
+        assert_eq!(ids(&empty), Vec::<&str>::new());
+        assert_eq!(empty["older"], false);
+    }
 }

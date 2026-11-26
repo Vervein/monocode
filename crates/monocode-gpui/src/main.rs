@@ -40,7 +40,6 @@ mod history;
 mod image_lightbox;
 mod image_memory;
 mod inbox;
-mod workspaces;
 mod ink_field;
 mod input;
 mod markdown;
@@ -98,6 +97,7 @@ mod visuals;
 mod wheel_glide_tests;
 mod window_state;
 mod workspace;
+mod workspaces;
 mod worktree_switcher;
 
 use gpui::{App, KeyBinding, TitlebarOptions, WindowOptions, actions, point, prelude::*, px, size};

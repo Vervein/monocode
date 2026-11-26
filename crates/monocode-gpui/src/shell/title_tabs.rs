@@ -43,11 +43,18 @@ impl Shell {
         self.open_title_tab(&self.mono_tab(id.into()), window, cx);
     }
     pub(super) fn tab_scope(&self) -> String {
-        format!(
+        let base = format!(
             "{}\0{}",
             path_key(&self.workspace.project),
             path_key(self.working_copy())
-        )
+        );
+        // Local scopes keep their long-standing key; remote scopes add the
+        // machine identity so focus and restoration never cross hosts.
+        self.remote_workspaces
+            .selected
+            .as_ref()
+            .map(|machine| format!("{base}\0remote:{machine}"))
+            .unwrap_or(base)
     }
 
     pub(super) fn mono_tab(&self, id: String) -> TitleTab {
@@ -114,6 +121,20 @@ impl Shell {
                             .as_ref()
                             .is_some_and(|m| m.read(cx).roster.get(id).is_some())
                 }
+                TitleTab::RemoteMono { machine_id, id } => {
+                    !self.workspace.classic_layout
+                        && self.remote_workspaces.selected.as_deref() == Some(machine_id)
+                        && (self
+                            .remote_workspace_catalog(machine_id)
+                            .and_then(|catalog| catalog["monos"].as_array())
+                            .is_some_and(|monos| {
+                                monos.iter().any(|entry| entry["id"].as_str() == Some(id))
+                            })
+                            || self.machines.as_ref().is_some_and(|view| {
+                                view.read(cx).open_detail_key()
+                                    == Some((machine_id.clone(), id.clone()))
+                            }))
+                }
             })
             .cloned()
             .collect()
@@ -121,6 +142,20 @@ impl Shell {
 
     pub(super) fn active_title_tab(&self, cx: &App) -> Option<TitleTab> {
         if let Some(view) = self.active_app_view {
+            if view == app_views::AppView::Machines
+                && let Some((machine_id, id)) = self
+                    .machines
+                    .as_ref()
+                    .and_then(|view| view.read(cx).open_detail_key())
+            {
+                let tab = TitleTab::RemoteMono { machine_id, id };
+                // A detail opened inside Machines management remains the
+                // Machines tab unless navigation created a first-class remote
+                // tab for it in the currently selected host scope.
+                if self.visible_tabs(cx).contains(&tab) {
+                    return Some(tab);
+                }
+            }
             return Some(TitleTab::App(view));
         }
         if self.search_page() {
@@ -146,7 +181,9 @@ impl Shell {
     }
 
     pub(super) fn remember_title_tab(&mut self, tab: TitleTab) {
-        if self.workspace.classic_layout && matches!(tab, TitleTab::Mono { .. }) {
+        if self.workspace.classic_layout
+            && matches!(tab, TitleTab::Mono { .. } | TitleTab::RemoteMono { .. })
+        {
             return;
         }
         if !self.workspace.title_order.contains(&tab) {
@@ -210,6 +247,25 @@ impl Shell {
                     monos.update(cx, |m, cx| m.open(id, window, cx));
                 }
             }
+            TitleTab::RemoteMono { machine_id, id } => {
+                let entry = self
+                    .remote_workspace_catalog(machine_id)
+                    .and_then(|catalog| catalog["monos"].as_array())
+                    .and_then(|monos| {
+                        monos
+                            .iter()
+                            .find(|entry| entry["id"].as_str() == Some(id))
+                            .cloned()
+                    });
+                if let Some(entry) = entry {
+                    self.open_remote_workspace_mono(machine_id.clone(), entry, window, cx);
+                } else {
+                    // The catalog may not have synchronized yet after a restart;
+                    // opening Machines is an honest fallback rather than
+                    // fabricating a Mono the owner has not confirmed.
+                    self.open_machines(window, cx);
+                }
+            }
         }
     }
 
@@ -220,7 +276,7 @@ impl Shell {
     ) -> bool {
         let tab = self.workspace.scope_focus.get(&self.tab_scope()).cloned();
         if let Some(tab) = tab.filter(|tab| self.visible_tabs(cx).contains(tab)) {
-            if matches!(tab, TitleTab::Mono { .. }) {
+            if matches!(tab, TitleTab::Mono { .. } | TitleTab::RemoteMono { .. }) {
                 self.workspace.active = None;
             }
             self.open_title_tab(&tab, window, cx);
@@ -356,12 +412,26 @@ impl Shell {
         for tab in &closing {
             if let TitleTab::App(view) = tab
                 && self.active_app_view == Some(*view)
+                && active.as_ref() == Some(tab)
             {
+                // Closing the inactive Machines catalog tab must not hide the
+                // remote detail that is currently active inside that same view.
                 self.leave_app_views(cx);
             }
             if *tab == TitleTab::Search {
                 self.leave_app_search(cx);
                 self.saved_search = None;
+            }
+            if let TitleTab::RemoteMono { machine_id, id } = tab
+                && let Some(view) = self.machines.clone()
+            {
+                let machine_id = machine_id.clone();
+                let id = id.clone();
+                view.update(cx, |view, cx| {
+                    if view.open_detail_key() == Some((machine_id, id)) {
+                        view.close_detail(cx);
+                    }
+                });
             }
             if let TitleTab::Session(id) = tab {
                 self.workspace.close(*id);
@@ -501,6 +571,49 @@ mod tests {
                 assert_eq!(shell.workspace.active, Some(first));
                 assert_eq!(shell.workspace.project, "/work/monocode");
                 assert!(shell.workspace.tabs.contains(&other_project));
+            })
+            .unwrap();
+    }
+
+    #[gpui::test]
+    fn remote_mono_tabs_follow_their_host_scope(cx: &mut TestAppContext) {
+        let (window, _, _) = window(cx);
+        let machine = "machine-a".to_string();
+        let tab = TitleTab::RemoteMono {
+            machine_id: machine.clone(),
+            id: "remote-mono".into(),
+        };
+        window
+            .update(cx, |shell, _, cx| {
+                shell.workspace.title_order.push(tab.clone());
+                shell.remote_workspaces.replicas.insert(
+                    machine.clone(),
+                    crate::shell::remote_workspace::WorkspaceReplica {
+                        readiness: "ready".into(),
+                        catalog: Some(serde_json::json!({
+                            "monos": [{ "id": "remote-mono", "name": "Remote Mono" }],
+                            "projects": []
+                        })),
+                        ..Default::default()
+                    },
+                );
+                assert!(
+                    !shell.visible_tabs(cx).contains(&tab),
+                    "a remote tab never leaks into the local host scope"
+                );
+                shell.remote_workspaces.selected = Some(machine.clone());
+                assert!(shell.visible_tabs(cx).contains(&tab));
+                shell.remote_workspaces.selected = Some("machine-b".into());
+                assert!(
+                    !shell.visible_tabs(cx).contains(&tab),
+                    "same-shaped ids on another host stay distinct"
+                );
+                shell.remote_workspaces.selected = Some(machine.clone());
+                shell.workspace.classic_layout = true;
+                assert!(
+                    !shell.visible_tabs(cx).contains(&tab),
+                    "Classic keeps remote details out of the title strip"
+                );
             })
             .unwrap();
     }

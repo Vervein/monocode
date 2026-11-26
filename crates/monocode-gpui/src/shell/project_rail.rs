@@ -483,7 +483,11 @@ impl Shell {
                 .into_any(),
         }
     }
-    fn remote_workspace_entry(&self, kind: &str, id: &str) -> Option<(String, serde_json::Value)> {
+    pub(super) fn remote_workspace_entry(
+        &self,
+        kind: &str,
+        id: &str,
+    ) -> Option<(String, serde_json::Value)> {
         let machine_id = self.remote_workspaces.selected.clone()?;
         let catalog = self.remote_workspace_catalog(&machine_id)?;
         let entry = catalog[kind]
@@ -494,7 +498,7 @@ impl Shell {
         Some((machine_id, entry))
     }
 
-    fn remote_workspace_status_row(&self, compact: bool, cx: &mut Context<Self>) -> AnyElement {
+    fn remote_workspace_status_row(&self, compact: bool, _cx: &mut Context<Self>) -> AnyElement {
         let Some((_, replica)) = self.selected_workspace_replica() else {
             return div().into_any();
         };
@@ -534,18 +538,13 @@ impl Shell {
                     .gap_2()
                     .text_size(px(12.))
                     .text_color(content(if replica.offline { 0.9 } else { 0.45 }))
-                    .child(
-                        div()
-                            .size(px(7.))
-                            .rounded_full()
-                            .bg(if replica.offline {
-                                hsla(0.0, 0.72, 0.56, 1.0)
-                            } else if replica.readiness == "ready" {
-                                accent_color()
-                            } else {
-                                content(0.3)
-                            }),
-                    )
+                    .child(div().size(px(7.)).rounded_full().bg(if replica.offline {
+                        hsla(0.0, 0.72, 0.56, 1.0)
+                    } else if replica.readiness == "ready" {
+                        accent_color()
+                    } else {
+                        content(0.3)
+                    }))
                     .when(!compact, |d| {
                         d.child(div().flex_1().min_w_0().truncate().child(label))
                             .when(!detail.is_empty(), |d| {
@@ -564,7 +563,7 @@ impl Shell {
             .into_any()
     }
 
-    fn remote_workspace_mono_row(
+    pub(super) fn remote_workspace_mono_row(
         &mut self,
         id: String,
         compact: bool,
@@ -575,7 +574,10 @@ impl Shell {
         };
         let name = entry["name"].as_str().unwrap_or("Mono").to_string();
         let status = entry["status"].as_str().unwrap_or("idle").to_string();
-        let preview = entry["lastMessage"].as_str().unwrap_or_default().to_string();
+        let preview = entry["lastMessage"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
         let color = u32::from_str_radix(
             entry["color"]
                 .as_str()
@@ -679,7 +681,11 @@ impl Shell {
             .font_weight(FontWeight::MEDIUM)
             .text_color(content(0.85))
             .hover(|s| s.bg(content(0.08)))
-            .child(icon("folder", 15.).flex_shrink_0().text_color(content(0.45)))
+            .child(
+                icon("folder", 15.)
+                    .flex_shrink_0()
+                    .text_color(content(0.45)),
+            )
             .when(!compact, |d| {
                 d.child(div().flex_1().min_w_0().truncate().child(name.clone()))
                     .when(!branch.is_empty(), |d| {

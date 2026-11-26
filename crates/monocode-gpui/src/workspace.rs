@@ -43,13 +43,19 @@ pub(crate) enum TitleTab {
         project: String,
         worktree: String,
     },
+    /// A Mono in a remote workspace. It is host-scoped, never a local pane or
+    /// scheduler object; `machine_id` keeps tabs from different machines apart.
+    RemoteMono {
+        machine_id: String,
+        id: String,
+    },
 }
 
 impl TitleTab {
     pub fn session(&self) -> Option<i64> {
         match self {
             Self::Session(id) => Some(*id),
-            Self::Mono { .. } | Self::Search | Self::App(_) => None,
+            Self::Mono { .. } | Self::RemoteMono { .. } | Self::Search | Self::App(_) => None,
         }
     }
 }

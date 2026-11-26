@@ -251,6 +251,27 @@ impl Conversation {
         Ok(())
     }
 
+    /// The live input contract a workspace client may act on. Unlike the
+    /// compact transcript, this preserves request ids, approval detail and the
+    /// question's option values exactly as the answer commands need them.
+    pub(crate) fn workspace_interaction(&self, cx: &gpui::App) -> Value {
+        let waiting = match self.mobile_waiting(cx) {
+            Some(Waiting::Approval) => "approval",
+            Some(Waiting::Question) => "question",
+            None => "none",
+        };
+        json!({
+            "waiting": waiting,
+            "approvals": self.approvals.iter().map(|approval| json!({
+                "requestId": approval.id,
+                "title": approval.title,
+                "detail": approval.detail,
+                "canRemember": approval.can_remember,
+            })).collect::<Vec<_>>(),
+            "question": self.mobile_question(cx),
+        })
+    }
+
     pub(crate) fn mobile_waiting(&self, cx: &gpui::App) -> Option<Waiting> {
         let inputs = self.pending_notification_inputs(cx);
         if inputs.iter().any(|input| input.kind == InputKind::Approval) {
@@ -760,5 +781,68 @@ mod question_tests {
         );
         assert!(question_answers(&request, &json!({"kind":"answered","answers":{}})).is_err());
         assert!(question_answers(&request, &json!({"kind":"maybe"})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod interaction_tests {
+    use super::*;
+
+    #[gpui::test]
+    fn workspace_interaction_preserves_approval_and_question_contract(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        let store = Arc::new(std::sync::Mutex::new(
+            monocode_core::store::Store::open(std::path::Path::new(":memory:")).unwrap(),
+        ));
+        let summary = locked(&store).unwrap().create("codex", "/fixture").unwrap();
+        let view = cx.new(|cx| Conversation::new(summary, store, cx));
+        view.update(cx, |v, cx| {
+            v.approvals.push_back(Approval {
+                id: "approval-request".into(),
+                title: "Run tests?".into(),
+                detail: "cargo test".into(),
+                can_remember: true,
+            });
+            let question = Question {
+                id: "question-request".into(),
+                title: "Choose a direction".into(),
+                items: vec![QuestionItem {
+                    id: "choice".into(),
+                    prompt: "Which choice?".into(),
+                    multiple: false,
+                    allow_custom: true,
+                    options: vec![QuestionOption {
+                        id: "yes".into(),
+                        label: "Yes".into(),
+                        description: "Continue".into(),
+                    }],
+                }],
+                auto_resolve_at: Some(1234),
+            };
+            let card = cx.new(|cx| crate::questions::QuestionCard::new(question, cx));
+            v.questions.push_back((card, Vec::new()));
+            let interaction = v.workspace_interaction(cx);
+            assert_eq!(interaction["waiting"], "approval");
+            assert_eq!(
+                interaction["approvals"][0],
+                json!({
+                    "requestId": "approval-request",
+                    "title": "Run tests?",
+                    "detail": "cargo test",
+                    "canRemember": true,
+                })
+            );
+            assert_eq!(
+                interaction["question"]["requestId"].as_u64(),
+                Some(question_request_id("question-request"))
+            );
+            assert_eq!(interaction["question"]["title"], "Choose a direction");
+            assert_eq!(interaction["question"]["autoResolveAt"], 1234);
+            assert_eq!(
+                interaction["question"]["questions"][0]["options"][0],
+                json!({"id":"yes","label":"Yes","description":"Continue"})
+            );
+        });
     }
 }

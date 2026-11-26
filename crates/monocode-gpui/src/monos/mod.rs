@@ -603,7 +603,9 @@ impl Monos {
             return Err("Mono is no longer available".into());
         }
         self.ensure_chat(id, cx);
-        Ok(self.enqueue(id, text, attachments, false, cx).unwrap_or_default())
+        Ok(self
+            .enqueue(id, text, attachments, false, cx)
+            .unwrap_or_default())
     }
 
     /// Whether the roster write covering this message has reached disk.

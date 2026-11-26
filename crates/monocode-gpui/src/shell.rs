@@ -15,8 +15,6 @@ mod image_lightbox_tests;
 mod layout;
 mod live_agents;
 mod mobile_host;
-mod workspace_host;
-mod remote_workspace;
 mod mono_panes;
 pub(crate) mod monos;
 mod new_chat_choice;
@@ -34,6 +32,7 @@ mod quick_open;
 mod rails;
 mod remote_projects;
 mod remote_sessions;
+mod remote_workspace;
 mod search;
 mod session_filters;
 mod session_folders;
@@ -48,6 +47,7 @@ mod sidebar_peek;
 mod space_reorder;
 mod terminal_dock;
 mod terminal_panes;
+mod workspace_host;
 use terminal_panes::terminal_drag_ghost;
 mod title_tabs;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -365,6 +365,7 @@ fn adjacent<T: PartialEq + Clone>(items: &[T], current: Option<&T>, step: isize)
 pub(crate) enum MenuTarget {
     Tab(i64),
     MonoTab(String),
+    RemoteMonoTab(String, String),
     SearchTab,
     AppTab(app_views::AppView),
     Session(i64),
@@ -4733,7 +4734,11 @@ impl Shell {
     /// below the project switching controls. It is deliberately quiet chrome:
     /// projects remain the primary object, with the host only scoping which
     /// projects and Monos are shown.
-    fn host_scope_button(&self, compact: bool, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+    fn host_scope_button(
+        &self,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
         let selected = self.remote_workspaces.selected.clone();
         let machine = selected.as_ref().and_then(|id| {
             self.remote
@@ -5557,11 +5562,16 @@ impl Shell {
             ),
             MenuTarget::Tab(_)
             | MenuTarget::MonoTab(_)
+            | MenuTarget::RemoteMonoTab(_, _)
             | MenuTarget::SearchTab
             | MenuTarget::AppTab(_) => {
                 let tab = match target {
                     MenuTarget::Tab(id) => TitleTab::Session(*id),
                     MenuTarget::MonoTab(id) => self.mono_tab(id.clone()),
+                    MenuTarget::RemoteMonoTab(machine_id, id) => TitleTab::RemoteMono {
+                        machine_id: machine_id.clone(),
+                        id: id.clone(),
+                    },
                     MenuTarget::SearchTab => TitleTab::Search,
                     MenuTarget::AppTab(view) => TitleTab::App(*view),
                     _ => unreachable!(),
@@ -5634,6 +5644,10 @@ impl Shell {
                                 .and_then(|m| m.read(cx).roster.get(id))
                                 .map(|m| m.label())
                                 .unwrap_or_default(),
+                            TitleTab::RemoteMono { id, .. } => self
+                                .remote_workspace_entry("monos", id)
+                                .and_then(|(_, entry)| entry["name"].as_str().map(str::to_owned))
+                                .unwrap_or_else(|| "Remote Mono".into()),
                         }
                     )
                     .into(),
@@ -5743,12 +5757,7 @@ impl Shell {
                         .icon("settings")
                         .into(),
                 ]);
-                (
-                    "Choose host".into(),
-                    items,
-                    280.,
-                    MenuStyle::Switcher,
-                )
+                ("Choose host".into(), items, 280., MenuStyle::Switcher)
             }
             MenuTarget::CompactProjectPicker => {
                 let (monos, active) = self
@@ -6042,6 +6051,9 @@ impl Shell {
             MenuTarget::MonoTab(id) => {
                 self.run_title_tab_menu(self.mono_tab(id), action, window, cx)
             }
+            MenuTarget::RemoteMonoTab(machine_id, id) => {
+                self.run_title_tab_menu(TitleTab::RemoteMono { machine_id, id }, action, window, cx)
+            }
             MenuTarget::SearchTab => self.run_title_tab_menu(TitleTab::Search, action, window, cx),
             MenuTarget::AppTab(view) => {
                 self.run_title_tab_menu(TitleTab::App(view), action, window, cx)
@@ -6059,9 +6071,10 @@ impl Shell {
                 "add-ssh-host" | "manage-connections" => {
                     self.open_settings(crate::settings::Section::Connections, window, cx)
                 }
-                action if action.starts_with("host:") => {
-                    self.select_workspace_scope(Some(action.trim_start_matches("host:").to_string()), cx)
-                }
+                action if action.starts_with("host:") => self.select_workspace_scope(
+                    Some(action.trim_start_matches("host:").to_string()),
+                    cx,
+                ),
                 _ => {}
             },
             MenuTarget::ProjectRailGroup(id) => {
@@ -7944,7 +7957,7 @@ impl Shell {
         let source = match &id {
             TitleTab::Session(tab) => Some(DragSource::Tab(*tab)),
             TitleTab::Mono { .. } => Some(DragSource::MonoTab),
-            TitleTab::Search | TitleTab::App(_) => None,
+            TitleTab::RemoteMono { .. } | TitleTab::Search | TitleTab::App(_) => None,
         };
         let was = self.pane_drag.is_some();
         self.pane_drag = source.filter(|_| armed).map(|source| PaneDrag {
@@ -8507,6 +8520,16 @@ impl Shell {
                 }
                 TitleTab::Search => {
                     let element = self.search_title_tab(tab_width(tab), cx).left(shifts[ix]);
+                    Some(if dragged.as_ref() == Some(tab) {
+                        gpui::deferred(element).with_priority(1).into_any_element()
+                    } else {
+                        element.into_any_element()
+                    })
+                }
+                TitleTab::RemoteMono { machine_id, id } => {
+                    let element = self
+                        .remote_mono_title_tab(machine_id, id, tab_width(tab), cx)
+                        .left(shifts[ix]);
                     Some(if dragged.as_ref() == Some(tab) {
                         gpui::deferred(element).with_priority(1).into_any_element()
                     } else {
@@ -9178,7 +9201,8 @@ impl Render for Shell {
                     if this.workspace.classic_layout {
                         this.close_app_view(window, cx);
                     } else {
-                        this.close_title_tabs(&[TitleTab::App(view)], None, window, cx);
+                        let tab = this.active_title_tab(cx).unwrap_or(TitleTab::App(view));
+                        this.close_title_tabs(&[tab], None, window, cx);
                     }
                     return;
                 }
@@ -9561,6 +9585,14 @@ mod tests {
     use super::*;
     use gpui::{EntityInputHandler, TestAppContext, WindowHandle};
     use monocode_core::store::Store;
+
+    pub(super) fn modifier() -> &'static str {
+        if cfg!(target_os = "macos") {
+            "cmd"
+        } else {
+            "ctrl"
+        }
+    }
     #[gpui::test]
     fn window_state_is_saved_on_resize_and_restored_with_the_workspace(cx: &mut TestAppContext) {
         let (window, _, _) = window(cx);
@@ -12740,7 +12772,7 @@ mod tests {
             cx.debug_bounds(count_selector).is_none(),
             "a single pane has no count badge"
         );
-        cx.simulate_keystrokes("cmd-d");
+        cx.simulate_keystrokes(&format!("{}-d", modifier()));
         cx.run_until_parked();
         let new = window
             .update(cx, |shell, _, _| {
@@ -12940,7 +12972,7 @@ mod tests {
             .unwrap();
 
         // ⌘W closes the focused pane only; its neighbour takes focus.
-        cx.simulate_keystrokes("cmd-w");
+        cx.simulate_keystrokes(&format!("{}-w", modifier()));
         cx.run_until_parked();
         window
             .update(cx, |shell, _, _| {
@@ -13039,7 +13071,7 @@ mod tests {
             .unwrap();
         let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
-        cx.simulate_keystrokes("cmd-d");
+        cx.simulate_keystrokes(&format!("{}-d", modifier()));
         cx.run_until_parked();
         cx.update(|_, cx| cx.set_reduce_motion(false));
         let new = window
@@ -13211,7 +13243,7 @@ mod tests {
                 assert_eq!(shell.viewport_width, 1000.);
             })
             .unwrap();
-        cx.simulate_keystrokes("cmd-d");
+        cx.simulate_keystrokes(&format!("{}-d", modifier()));
         cx.run_until_parked();
         let new = window
             .update(cx, |shell, _, cx| {
@@ -13229,10 +13261,10 @@ mod tests {
             .update(cx, |shell, _, _| assert!(shell.workspace.sidebar_visible))
             .unwrap();
         // A sidebar the user hid stays hidden when room comes back.
-        cx.simulate_keystrokes("cmd-d");
+        cx.simulate_keystrokes(&format!("{}-d", modifier()));
         cx.run_until_parked();
         // Collapsed for the split; shown, then hidden again by hand.
-        cx.simulate_keystrokes("cmd-b cmd-b");
+        cx.simulate_keystrokes(&format!("{0}-b {0}-b", modifier()));
         cx.run_until_parked();
         window
             .update(cx, |shell, w, cx| {
@@ -13266,8 +13298,11 @@ mod tests {
             .unwrap();
         let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
-        for keys in ["cmd-d", "cmd-shift-d"] {
-            cx.simulate_keystrokes(keys);
+        for keys in [
+            format!("{}-d", modifier()),
+            format!("{}-shift-d", modifier()),
+        ] {
+            cx.simulate_keystrokes(&keys);
             cx.run_until_parked();
             window
                 .update(cx, |shell, _, cx| {
@@ -13302,7 +13337,7 @@ mod tests {
         let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
         // Wide enough for two panes beside the sidebar.
-        cx.simulate_keystrokes("cmd-d");
+        cx.simulate_keystrokes(&format!("{}-d", modifier()));
         cx.run_until_parked();
         window
             .update(cx, |shell, _, _| assert!(shell.workspace.sidebar_visible))
@@ -13322,13 +13357,13 @@ mod tests {
         // Shown by hand while crowded, it stays until the room changes again.
         cx.simulate_resize(gpui::size(px(1000.), px(800.)));
         cx.run_until_parked();
-        cx.simulate_keystrokes("cmd-b");
+        cx.simulate_keystrokes(&format!("{}-b", modifier()));
         cx.run_until_parked();
         window
             .update(cx, |shell, _, _| assert!(shell.workspace.sidebar_visible))
             .unwrap();
         // Hidden by hand, it stays hidden however wide the window grows.
-        cx.simulate_keystrokes("cmd-b");
+        cx.simulate_keystrokes(&format!("{}-b", modifier()));
         cx.simulate_resize(gpui::size(px(1600.), px(800.)));
         cx.run_until_parked();
         window
@@ -13401,7 +13436,7 @@ mod tests {
         let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
         assert!(cx.debug_bounds("terminal-dock").is_none());
-        cx.simulate_keystrokes("cmd-j");
+        cx.simulate_keystrokes(&format!("{}-j", modifier()));
         cx.run_until_parked();
         let project = window
             .update(cx, |shell, w, cx| {
@@ -13419,7 +13454,7 @@ mod tests {
         assert!((dock.size.height - px(220.)).abs() < px(2.));
         // ⌘T in the dock opens another terminal, not a session tab.
         let tabs = window.update(cx, |s, _, _| s.workspace.tabs.len()).unwrap();
-        cx.simulate_keystrokes("cmd-t");
+        cx.simulate_keystrokes(&format!("{}-t", modifier()));
         cx.run_until_parked();
         window
             .update(cx, |shell, w, cx| {
@@ -13431,7 +13466,7 @@ mod tests {
             .unwrap();
         assert!(cx.debug_bounds("terminal-tab-1").is_some());
         // ⌘W closes the focused terminal; the session tab stays.
-        cx.simulate_keystrokes("cmd-w");
+        cx.simulate_keystrokes(&format!("{}-w", modifier()));
         cx.run_until_parked();
         window
             .update(cx, |shell, _, _| {
@@ -13457,7 +13492,7 @@ mod tests {
         window
             .update(cx, |shell, w, cx| shell.focus_terminal(w, cx))
             .unwrap();
-        cx.simulate_keystrokes("cmd-j");
+        cx.simulate_keystrokes(&format!("{}-j", modifier()));
         cx.run_until_parked();
         window
             .update(cx, |shell, w, cx| {

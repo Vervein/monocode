@@ -17,6 +17,9 @@ enum Row {
         first: bool,
     },
     Session(i64),
+    /// A Mono in the selected remote workspace. The string is the owner
+    /// catalog's Mono id; opening it must stay on the remote command surface.
+    RemoteMono(String),
     GroupedSession {
         id: i64,
         first: bool,
@@ -31,6 +34,7 @@ enum Row {
     ClassicFolderNew(String),
     ClassicGap(usize),
     Empty,
+    RemoteEmpty,
 }
 
 pub(super) struct SidebarList {
@@ -241,26 +245,36 @@ impl Shell {
             {
                 self.sidebar_list.structural_rebuilds += 1;
             }
-            let ids = self.sidebar_session_ids(cx);
-            self.sync_rails(&ids, cx);
-            let entries = self.session_entries(&ids, cx);
-            let listed: HashSet<_> = ids.iter().copied().collect();
-            self.session_row_bounds.retain(|id, _| listed.contains(id));
-            for id in ids {
-                self.session_row_bounds.entry(id).or_default();
+            if self.remote_workspaces.selected.is_some() {
+                // A remote host scope is not a filtered view of local sessions:
+                // its rows come from the owner catalog and open through workspace
+                // commands. Keep local session structures intact underneath, but
+                // never interleave them with the remote view.
+                self.session_row_bounds.clear();
+                self.folder_bounds.clear();
+                self.prepare_remote_sidebar_list();
+            } else {
+                let ids = self.sidebar_session_ids(cx);
+                self.sync_rails(&ids, cx);
+                let entries = self.session_entries(&ids, cx);
+                let listed: HashSet<_> = ids.iter().copied().collect();
+                self.session_row_bounds.retain(|id, _| listed.contains(id));
+                for id in ids {
+                    self.session_row_bounds.entry(id).or_default();
+                }
+                let folders: HashSet<_> = entries
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        Entry::Folder { id, .. } => Some(id.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                self.folder_bounds.retain(|id, _| folders.contains(id));
+                for id in folders {
+                    self.folder_bounds.entry(id).or_default();
+                }
+                self.prepare_sidebar_list(&entries, cx);
             }
-            let folders: HashSet<_> = entries
-                .iter()
-                .filter_map(|entry| match entry {
-                    Entry::Folder { id, .. } => Some(id.clone()),
-                    _ => None,
-                })
-                .collect();
-            self.folder_bounds.retain(|id, _| folders.contains(id));
-            for id in folders {
-                self.folder_bounds.entry(id).or_default();
-            }
-            self.prepare_sidebar_list(&entries, cx);
         }
         self.sync_sidebar_list_visibility();
         self.sidebar_list.clear_bounds();
@@ -268,15 +282,65 @@ impl Shell {
 
     fn sidebar_scope(&self) -> String {
         format!(
-            "{}\0{}\0{}\0{:?}\0{}\0{}\0{}",
+            "{}\0{}\0{}\0{:?}\0{}\0{}\0{}\0{}",
             self.workspace.project,
             self.working_copy(),
             self.query,
             self.workspace.session_filters,
             self.workspace.preferences.show_archived,
             self.workspace.boxy_layout(),
-            self.workspace.classic_layout
+            self.workspace.classic_layout,
+            self.remote_workspaces
+                .selected
+                .as_deref()
+                .unwrap_or("local")
         )
+    }
+
+    /// Focused navigation in a remote host scope: catalog Monos as remote rows,
+    /// never local sessions re-labelled as remote ones. The row renderer reads
+    /// the live replica again so status and preview updates do not require a
+    /// structural rebuild.
+    fn prepare_remote_sidebar_list(&mut self) {
+        let catalog = self
+            .selected_workspace_replica()
+            .filter(|(_, replica)| replica.usable())
+            .and_then(|(machine_id, _)| self.remote_workspace_catalog(machine_id));
+        let query = self.query.trim().to_lowercase();
+        let mut monos = Vec::new();
+        if let Some(catalog) = catalog {
+            for entry in catalog["monos"].as_array().into_iter().flatten() {
+                let Some(id) = entry["id"].as_str().map(str::to_owned) else {
+                    continue;
+                };
+                if !query.is_empty() {
+                    let searchable = format!(
+                        "{}\n{}\n{}",
+                        entry["name"].as_str().unwrap_or_default(),
+                        entry["status"].as_str().unwrap_or_default(),
+                        entry["lastMessage"].as_str().unwrap_or_default(),
+                    )
+                    .to_lowercase();
+                    if !searchable.contains(&query) {
+                        continue;
+                    }
+                }
+                monos.push(Row::RemoteMono(id));
+            }
+        }
+        let empty = monos.is_empty();
+        let mut rows = vec![
+            Row::Navigation,
+            Row::Heading {
+                label: "Monos",
+                first: true,
+            },
+        ];
+        rows.extend(monos);
+        if empty {
+            rows.push(Row::RemoteEmpty);
+        }
+        self.sidebar_list.update(self.sidebar_scope(), rows);
     }
 
     pub(super) fn prepare_sidebar_list(&mut self, entries: &[Entry], cx: &App) {
@@ -507,6 +571,7 @@ impl Shell {
                 .when(first, |d| d.child(self.sidebar_filter_button(cx)))
                 .into_any(),
             Row::Session(id) => self.session_card(id, cx),
+            Row::RemoteMono(id) => return self.remote_workspace_mono_row(id, false, cx),
             Row::GroupedSession { id, first, last } => {
                 return div()
                     .px_2()
@@ -545,6 +610,17 @@ impl Shell {
                     "No sessions yet"
                 } else {
                     "No matching sessions"
+                })
+                .into_any(),
+            Row::RemoteEmpty => div()
+                .px_2()
+                .py_2()
+                .text_size(px(12.))
+                .text_color(rgb(MUTED))
+                .child(if self.query.is_empty() {
+                    "No remote Monos yet"
+                } else {
+                    "No matching remote Monos"
                 })
                 .into_any(),
         };

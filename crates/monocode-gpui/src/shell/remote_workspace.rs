@@ -85,7 +85,11 @@ impl Shell {
         outcome: Result<Poll, String>,
         cx: &mut Context<Self>,
     ) {
-        let replica = self.remote_workspaces.replicas.entry(machine_id.into()).or_default();
+        let replica = self
+            .remote_workspaces
+            .replicas
+            .entry(machine_id.into())
+            .or_default();
         match outcome {
             Ok(poll) => {
                 replica.offline = false;
@@ -128,6 +132,14 @@ impl Shell {
             return;
         }
         self.remote_workspaces.selected = machine_id.clone();
+        if let Some(view) = self.machines.clone() {
+            view.update(cx, |view, cx| {
+                let detail_machine = view.open_detail_key().map(|(machine, _)| machine);
+                if detail_machine != machine_id {
+                    view.close_detail(cx);
+                }
+            });
+        }
         if let Some(machine_id) = machine_id {
             self.sync_remote_workspace(&machine_id, cx);
         }
@@ -145,7 +157,11 @@ impl Shell {
     /// them. Empty both for an empty workspace and for one that has not
     /// synced yet; the readiness and detail say which.
     pub(super) fn remote_workspace_catalog(&self, machine_id: &str) -> Option<&Value> {
-        self.remote_workspaces.replicas.get(machine_id)?.catalog.as_ref()
+        self.remote_workspaces
+            .replicas
+            .get(machine_id)?
+            .catalog
+            .as_ref()
     }
 
     /// Opens a catalog Mono through the remote workspace surface. The detail
@@ -158,12 +174,31 @@ impl Shell {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        let had_machines_tab = self
+            .workspace
+            .title_order
+            .contains(&TitleTab::App(crate::shell::app_views::AppView::Machines));
         self.open_machines(window, cx);
+        let id = entry["id"].as_str().unwrap_or_default().to_string();
         if let Some(view) = self.machines.clone() {
             view.update(cx, |view, cx| {
-                view.open_machine_mono_entry(machine_id, entry, cx)
+                view.open_machine_mono_entry(machine_id.clone(), entry, cx)
             });
         }
+        if !self.workspace.classic_layout && !id.is_empty() {
+            if !had_machines_tab {
+                // A Mono opened straight from navigation gets its own tab, not an
+                // extra catalog tab the user never asked for. The catalog remains
+                // one click away through Machines navigation.
+                self.workspace.title_order.retain(|tab| {
+                    *tab != TitleTab::App(crate::shell::app_views::AppView::Machines)
+                });
+            }
+            self.remember_title_tab(TitleTab::RemoteMono { machine_id, id });
+            self.reveal_active_tab(cx);
+            self.persist(cx);
+        }
+        cx.notify();
     }
 
     /// Opens a catalog project through the existing remote-project runtime.
@@ -185,15 +220,12 @@ impl Shell {
             .map(|replica| replica.environment_id.clone())
             .filter(|id| !id.is_empty())
             .or_else(|| {
-                self.remote
-                    .list()
-                    .ok()
-                    .and_then(|machines| {
-                        machines
-                            .into_iter()
-                            .find(|machine| machine.id == machine_id)
-                            .map(|machine| machine.environment_id)
-                    })
+                self.remote.list().ok().and_then(|machines| {
+                    machines
+                        .into_iter()
+                        .find(|machine| machine.id == machine_id)
+                        .map(|machine| machine.environment_id)
+                })
             });
         let Some(environment_id) = environment_id else {
             self.error = Some("The machine's environment identity is not known yet".into());
@@ -235,10 +267,16 @@ struct Poll {
 /// One synchronisation round: describe the environment, then refill the
 /// replica when the owner's catalog moved. Blocking host RPCs stay on the
 /// background executor; the shell only ever applies their results.
-fn poll_workspace_once(remote: &Arc<monocode_core::remote::Connections>, machine_id: &str) -> Result<Poll, String> {
+fn poll_workspace_once(
+    remote: &Arc<monocode_core::remote::Connections>,
+    machine_id: &str,
+) -> Result<Poll, String> {
     let describe = remote.request(machine_id, "environment.describe", json!({}))?;
     let workspace = &describe["workspace"];
-    let readiness = workspace["readiness"].as_str().unwrap_or("unbound").to_string();
+    let readiness = workspace["readiness"]
+        .as_str()
+        .unwrap_or("unbound")
+        .to_string();
     let capabilities: Vec<String> = workspace["capabilities"]
         .as_array()
         .into_iter()
@@ -249,13 +287,23 @@ fn poll_workspace_once(remote: &Arc<monocode_core::remote::Connections>, machine
     let mut poll = Poll {
         readiness: readiness.clone(),
         source_id: workspace["workspaceSourceId"].as_str().map(str::to_owned),
-        owner_epoch: workspace["ownerEpoch"].as_str().unwrap_or_default().to_string(),
+        owner_epoch: workspace["ownerEpoch"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
         capabilities: capabilities.clone(),
-        environment_id: describe["environmentId"].as_str().unwrap_or_default().to_string(),
+        environment_id: describe["environmentId"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string(),
         detail: workspace["detail"].as_str().unwrap_or_default().to_string(),
         catalog: None,
     };
-    if readiness != "ready" || !capabilities.iter().any(|capability| capability == "workspace.catalog.v1") {
+    if readiness != "ready"
+        || !capabilities
+            .iter()
+            .any(|capability| capability == "workspace.catalog.v1")
+    {
         return Ok(poll);
     }
     let catalog = remote.request(machine_id, "workspace.catalog", json!({}))?;

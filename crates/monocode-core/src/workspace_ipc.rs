@@ -9,16 +9,15 @@
 //! application produces them, so a slow read never blocks a fast one.
 
 use crate::workspace_protocol::{
-    BackendDescriptorFile, IPC_MAX_MESSAGE_BYTES, IPC_PROTOCOL_VERSION, IpcHello, IpcRequest,
-    IpcResponse, ensure_workspace_source, workspace_runtime_dir,
-    write_private_atomic,
+    ensure_workspace_source, workspace_runtime_dir, write_private_atomic, BackendDescriptorFile,
+    IpcHello, IpcRequest, IpcResponse, IPC_MAX_MESSAGE_BYTES, IPC_PROTOCOL_VERSION,
 };
 use serde_json::Value;
 use std::io::{BufReader, Read, Write};
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc as std_mpsc;
+use std::sync::Arc;
 
 pub struct WorkspaceIpc {
     socket_path: PathBuf,
@@ -119,8 +118,8 @@ impl WorkspaceIpc {
             .set_nonblocking(true)
             .map_err(|error| error.to_string())?;
 
-        let token = uuid::Uuid::new_v4().simple().to_string()
-            + &uuid::Uuid::new_v4().simple().to_string();
+        let token =
+            uuid::Uuid::new_v4().simple().to_string() + &uuid::Uuid::new_v4().simple().to_string();
         let descriptor_path = backends.join(format!("{}.json", std::process::id()));
         let descriptor = BackendDescriptorFile {
             version: 1,
@@ -235,20 +234,14 @@ fn serve_connection(
     // only this user can read, inside a directory only this user can list.
     let authenticated = match read_frame(&mut reader) {
         Ok(Some(line)) => serde_json::from_slice::<IpcHello>(&line)
-            .map(|hello| {
-                hello.token == token && hello.protocol <= IPC_PROTOCOL_VERSION
-            })
+            .map(|hello| hello.token == token && hello.protocol <= IPC_PROTOCOL_VERSION)
             .unwrap_or(false),
         _ => false,
     };
     if !authenticated {
         return;
     }
-    loop {
-        let line = match read_frame(&mut reader) {
-            Ok(Some(line)) => line,
-            _ => break,
-        };
+    while let Ok(Some(line)) = read_frame(&mut reader) {
         let request = match serde_json::from_slice::<IpcRequest>(&line) {
             Ok(request) if !request.method.is_empty() => request,
             _ => continue,
@@ -379,7 +372,12 @@ mod tests {
         let (server, events) = WorkspaceIpc::open_in(&data, "test", runtime.clone()).unwrap();
         let info = server.info();
         let descriptor: BackendDescriptorFile = serde_json::from_str(
-            &std::fs::read_to_string(runtime.join("workspace-backends").join(format!("{}.json", std::process::id()))).unwrap(),
+            &std::fs::read_to_string(
+                runtime
+                    .join("workspace-backends")
+                    .join(format!("{}.json", std::process::id())),
+            )
+            .unwrap(),
         )
         .unwrap();
         assert_eq!(descriptor.workspace_source_id, info.source_id);
@@ -404,7 +402,10 @@ mod tests {
         let answer = client.request("workspace.describe", json!({})).unwrap();
         assert_eq!(answer["echo"], json!({}));
         client.request("workspace.catalog", json!({"x":1})).unwrap();
-        assert_eq!(answering.join().unwrap(), ["workspace.describe", "workspace.catalog"]);
+        assert_eq!(
+            answering.join().unwrap(),
+            ["workspace.describe", "workspace.catalog"]
+        );
 
         // A wrong token never reaches the application: the server closes the
         // connection, so the first request dies unanswered.

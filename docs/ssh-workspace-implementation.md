@@ -178,3 +178,42 @@ Devin Review 初审 6 项,5 项已修并回归(写路径 harness 22/22):
 - 远端 scope 下禁用底部项目图标的本地拖拽排序和本地项目右键菜单,避免把远端 catalog 对象误当成本地 project 状态。
 
 验证:`cd crates/monocode-gpui && cargo check --tests` 通过。
+
+## 历史分页、Focused 接入与远程交互(进行中,本地未提交)
+
+本批先把 PR Review 指出的历史不可达问题做成协议行为,而不是客户端 workaround:
+
+- owner 的 `monos.history` 现在理解当前已加载窗口内的 `before=tN`:先在窗口内返回前一页;当请求已到窗口顶部且 store snapshot 带有 history cursor 时,跨入 store 的 older page,不再重复返回最新页。
+- Machines 远程 Mono detail 改为保留完整 turns。tail refresh 按 turn id 原地更新/追加,不再覆盖用户已加载的旧页;`Load older messages` 用第一个已加载 turn id 请求上一页并按 anchor 插入、去重。
+- Focused sidebar 在 remote host scope 下不再误列本地 session。它现在渲染 owner catalog 的远程 Mono rows,点击仍打开 workspace-command backed detail;远程 rows 不进入本地 Mono manager/scheduler。
+
+Focused title tab 已有最小安全切片:
+
+- `TitleTab::RemoteMono { machine_id, id }` 是独立持久化 identity,不复用本地 Mono identity,也不会进入本地 pane/split/scheduler。
+- tab scope 对本机保持原 key,对 remote scope 追加 machine identity,避免不同主机或本机之间的 focus/restore 串扰。
+- 从 host-scoped navigation 打开的远程 Mono 会得到自己的 Focused title tab;Machines catalog tab 与 detail tab 可以并存。直接在 Machines 管理面里打开的 detail 仍属于 Machines tab,不会隐式制造远程对象 tab。
+- 远程 tab 可关闭、 pinning/menu/reorder 走通用 tab 机制;拖入本地 pane split 的语义明确不开放。
+- 测试平台修正:原 3 个 sidebar/pane 测试失败不是远程改动引入,而是 Linux 下测试硬编码 `cmd`、实际绑定为 `ctrl`;已按平台修正。相关 title tab 测试通过,另有一个 layout 动画断言宽跑偶发、单跑通过,仍按 flake 观察。
+
+审批/问题/取消协议缺口已补第一版:
+
+- `monos.profile` 新增 `interaction` 投影,包含 `waiting`、结构化 `approvals[](requestId/title/detail/canRemember)` 和 live `question`(沿用 phone question prompt 的 requestId/options/multiSelect/allowCustom/autoResolveAt 形状)。compact transcript 不再是审批交互的信息来源。
+- workspace commands 新增 `mono.decideApproval`,沿用本地 `decide_notification_request`,支持 `allow` / `session` / `deny`;`mono.answerQuestion` 和 `mono.cancel` 继续使用既有 owner 路径。
+- Machines 远程 Mono detail 现在渲染审批卡片、问题选项/自定义答案/跳过/keep-open 控件和忙碌时的 Cancel;所有动作都通过 `workspace.commands.dispatch` 与 receipt 回写,不直接操作本地对象。
+- approval/question command id 由精确业务 payload 派生,传输失败后的同答案重试可命中 owner receipt;cancel 每次点击是新命令,因为每次中断请求都是新业务意图。
+
+验证:`cargo check --tests` 通过;`workspace_history` 2/2、`workspaces::tests` 3/3、remote title tab 定向测试 1/1 通过。
+
+真实 SSH 验证已完成(2026-11-26):先 `npm ci` 安装锁定依赖,再 `npm run host:package` 生成 `monocode-host-linux-x64.tar.gz`;`scripts/test-remote-ssh.py --native --profile dev` 的仓库原版在 cargo test 阶段因硬编码 `--offline` 且本机缓存缺 `build_const` 失败,但失败前 native askpass 已通过。随后用同一脚本的内存替换版本仅去掉 `--offline` 重跑,结果通过:disposable loopback sshd、临时密钥/known_hosts、native askpass host fingerprint 确认、packaged host start/pair/token、真实 OpenSSH tunnel 与两次断连重连均 PASS,且脚本清理临时服务,不改个人 SSH 配置或 OS service。该 harness 验证的是 pairing/install/transport,不是 workspace RPC 本身的额外端到端用例。
+
+最终局部复核:`git diff --check` 通过。`npm run check:web` 跑到 5572 pass / 1 fail / 13 skipped;唯一失败是既有 `agentAppMemory.test.ts` habit schedule 文案断言(期望 `Weekdays at 9:00 AM`,实际 `Weekdays at 9:00`),看起来是 locale/时间格式基线问题,与本次 Rust/GPUI 远程工作区改动无关,但因此不能把 web check 记为通过。
+
+最新收尾:approval/question/cancel fake-host UI harness、多机器作用域、host 离线/恢复 poll 均已通过(`workspaces::tests` 6/6)。`npm run native:check` 的 node 脚本、fmt、clippy、core tests 全部通过;GPUI 串行测试 867 passed / 1 failed / 1 ignored,唯一失败是既有 `mermaid-rs-renderer` 依赖内部 geometry validation,与本批无关。剩余仅为 PR 更新/review thread 处理。
+
+## 第二轮最终验证补充(本地未提交)
+
+- 英文 locale 下 `LANG=en_US.UTF-8 npm run check:web` 全绿:513 files / 5573 tests passed,13 skipped。此前中文 locale 的 habit schedule 失败确认是 `toLocaleTimeString` 24 小时制环境差异,不是回归。
+- 完整 `cargo test` 第二轮:857 passed / 8 failed / 1 ignored。快捷键相关失败已通过测试平台修正消除;剩余 8 个中 6 个单跑全部通过,属于并行/动画时序不稳定。两个单跑仍失败且与本批远程工作区文件无关:`editor_analysis` QuickJS deadlock、`markdown::mermaid` 依赖内部 geometry validation panic。
+- 自审并修复远程命令竞态:send/approval/question/cancel 在飞行途中若用户切换 detail,回调不再写入新 detail。
+- 测试平台修正扩大到 settings/pinned tabs/terminal panes 的 shell 快捷键模拟:Linux 使用 ctrl,macOS 使用 cmd;不改产品行为。
+- clippy 仍在后台运行,尚无最终结论。所有代码仍未 commit/push。

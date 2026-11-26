@@ -105,6 +105,10 @@ impl Monos {
         };
         let mut documents = mono.documents.clone();
         documents.sort_by_key(|d| std::cmp::Reverse(d.updated_at.max(d.created_at)));
+        let interaction = self.chats.get(&mono.id).map_or_else(
+            || json!({"waiting": "none", "approvals": [], "question": null}),
+            |chat| chat.read(cx).workspace_interaction(cx),
+        );
 
         Ok(json!({
             "status": status,
@@ -144,6 +148,7 @@ impl Monos {
                 "lastError": h.last_error,
                 "runs": h.runs.iter().rev().take(10).collect::<Vec<_>>(),
             })).collect::<Vec<_>>(),
+            "interaction": interaction,
             "documents": documents.iter().map(|d| json!({
                 "id": d.id,
                 "title": d.title,

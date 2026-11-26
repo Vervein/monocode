@@ -93,10 +93,10 @@ pub(super) enum Target {
 /// A conversation read from disk, reused until the session opens on desktop.
 pub(super) struct Saved {
     pub(super) id: i64,
-    pub(super)    settings: Settings,
-    pub(super)    rows: Vec<Row>,
-    pub(super)    harness: String,
-    pub(super)    cwd: String,
+    pub(super) settings: Settings,
+    pub(super) rows: Vec<Row>,
+    pub(super) harness: String,
+    pub(super) cwd: String,
     /// The store cursor for turns above `rows`: a long Mono loads only its
     /// newest page.
     pub(super) history: Option<i64>,
@@ -204,11 +204,9 @@ pub(super) fn string(params: &Value, key: &str) -> Option<String> {
     params[key].as_str().map(str::to_owned)
 }
 
-
 /// Everything catalog assembly needs from live shell state, collected on the
 /// main thread before the store work moves to a background executor.
 pub(super) struct CatalogInputs {
-    pub(super) paths: Vec<String>,
     pub(super) projects: Vec<Value>,
     pub(super) entries: Vec<CatalogEntry>,
     pub(super) monos: Vec<(monocode_core::mono::Mono, Option<Value>)>,
@@ -216,7 +214,6 @@ pub(super) struct CatalogInputs {
     pub(super) previews: HashMap<i64, MonoPreview>,
     pub(super) ids: HashMap<i64, String>,
 }
-
 
 /// The store-reading half of catalog construction, shared by the phone
 /// publish loop and workspace IPC answers. Returns the catalog payload plus
@@ -235,99 +232,134 @@ pub(super) async fn assemble_catalog(
         ..
     } = inputs;
 
-        let saved = {
-            let store = locked(&store)?;
-            for id in entries.iter().map(|entry| entry.id).chain(monos.iter().filter_map(|(mono, _)| mono.session_id)) {
-                if let std::collections::hash_map::Entry::Vacant(entry) = ids.entry(id)
-                    && let Ok(value) = store.persisted_session_id(id)
-                {
-                    entry.insert(value);
-                }
+    let saved = {
+        let store = locked(store)?;
+        for id in entries
+            .iter()
+            .map(|entry| entry.id)
+            .chain(monos.iter().filter_map(|(mono, _)| mono.session_id))
+        {
+            if let std::collections::hash_map::Entry::Vacant(entry) = ids.entry(id)
+                && let Ok(value) = store.persisted_session_id(id)
+            {
+                entry.insert(value);
             }
-            for (id, updated_at) in &saved_monos {
-                let fresh = previews
-                    .get(id)
-                    .is_some_and(|p| updated_at.is_some_and(|at| at == p.updated_at));
-                if fresh {
-                    continue;
-                }
-                let Ok(history) = store.load(*id) else {
-                    continue;
-                };
-                let text = turns::messages(&history.rows)
-                    .pop()
-                    .map(|m| m["text"].clone())
-                    .unwrap_or(json!(""));
-                previews.insert(*id, MonoPreview { updated_at: updated_at.unwrap_or(0), text });
+        }
+        for (id, updated_at) in &saved_monos {
+            let fresh = previews
+                .get(id)
+                .is_some_and(|p| updated_at.is_some_and(|at| at == p.updated_at));
+            if fresh {
+                continue;
             }
-            previews.retain(|id, _| saved_monos.iter().any(|(saved, _)| saved == id));
-            store.mobile_session_metadata()?
-        };
-        let mut branches = HashMap::new();
-        let projects: Vec<_> = projects.into_iter().map(|mut project| {
+            let Ok(history) = store.load(*id) else {
+                continue;
+            };
+            let text = turns::messages(&history.rows)
+                .pop()
+                .map(|m| m["text"].clone())
+                .unwrap_or(json!(""));
+            previews.insert(
+                *id,
+                MonoPreview {
+                    updated_at: updated_at.unwrap_or(0),
+                    text,
+                },
+            );
+        }
+        previews.retain(|id, _| saved_monos.iter().any(|(saved, _)| saved == id));
+        store.mobile_session_metadata()?
+    };
+    let mut branches = HashMap::new();
+    let projects: Vec<_> = projects
+        .into_iter()
+        .map(|mut project| {
             let cwd = project["path"].as_str().unwrap_or_default().to_owned();
             project["branch"] = json!(mobile_catalog::checkout_branch(&cwd, &mut branches));
             project
-        }).collect();
-        let mut sessions = Vec::new();
-        for entry in entries {
-            let Some(id) = ids.get(&entry.id) else {
-                continue;
-            };
-            let metadata = mobile_catalog::metadata(saved.get(&entry.id).unwrap_or(&Default::default()), entry.live.as_ref());
-            let branch = if !metadata.worktree_removed && metadata.branch.as_ref().is_none_or(|branch| branch.is_empty()) {
-                mobile_catalog::checkout_branch(metadata.worktree_cwd.as_deref().unwrap_or(&entry.summary.cwd), &mut branches)
-            } else { String::new() };
-            sessions.push(mobile_catalog::session(&entry.summary, id, &entry.project, &metadata, entry.live.as_ref(), &branch));
-        }
-        sessions.sort_by_key(|s| std::cmp::Reverse(s["updatedAt"].as_u64()));
-        let monos: Vec<Value> = monos
-            .into_iter()
-            .map(|(mono, live)| {
-                let mut value = json!({
-                    "id": mono.id,
-                    "name": mono.label(),
-                    "mascot": mono.mascot,
-                    "color": hex(mono.color),
-                    "projectIds": mono.projects.iter().map(|p| project_id(p)).collect::<Vec<_>>(),
-                    "unread": 0,
-                    "status": "idle",
-                    "busy": false,
-                    "live": live.is_some(),
-                    "lastMessage": "",
-                    "lastActiveAt": 0,
-                });
-                if let Some(session) = mono.session_id.and_then(|id| ids.get(&id)) {
-                    value["sessionId"] = json!(session);
-                }
-                if let Some(subsessions) = &mono.subsessions {
-                    value["subsessions"] = json!(subsessions);
-                }
-                if let Some(preview) = mono.session_id.and_then(|id| previews.get(&id)) {
-                    value["lastMessage"] = preview.text.clone();
-                    value["lastActiveAt"] = json!(preview.updated_at);
-                }
-                if let Some(live) = live {
-                    for (key, field) in live.as_object().into_iter().flatten() {
-                        if !field.is_null() {
-                            value[key] = field.clone();
-                        }
+        })
+        .collect();
+    let mut sessions = Vec::new();
+    for entry in entries {
+        let Some(id) = ids.get(&entry.id) else {
+            continue;
+        };
+        let metadata = mobile_catalog::metadata(
+            saved.get(&entry.id).unwrap_or(&Default::default()),
+            entry.live.as_ref(),
+        );
+        let branch = if !metadata.worktree_removed
+            && metadata
+                .branch
+                .as_ref()
+                .is_none_or(|branch| branch.is_empty())
+        {
+            mobile_catalog::checkout_branch(
+                metadata
+                    .worktree_cwd
+                    .as_deref()
+                    .unwrap_or(&entry.summary.cwd),
+                &mut branches,
+            )
+        } else {
+            String::new()
+        };
+        sessions.push(mobile_catalog::session(
+            &entry.summary,
+            id,
+            &entry.project,
+            &metadata,
+            entry.live.as_ref(),
+            &branch,
+        ));
+    }
+    sessions.sort_by_key(|s| std::cmp::Reverse(s["updatedAt"].as_u64()));
+    let monos: Vec<Value> = monos
+        .into_iter()
+        .map(|(mono, live)| {
+            let mut value = json!({
+                "id": mono.id,
+                "name": mono.label(),
+                "mascot": mono.mascot,
+                "color": hex(mono.color),
+                "projectIds": mono.projects.iter().map(|p| project_id(p)).collect::<Vec<_>>(),
+                "unread": 0,
+                "status": "idle",
+                "busy": false,
+                "live": live.is_some(),
+                "lastMessage": "",
+                "lastActiveAt": 0,
+            });
+            if let Some(session) = mono.session_id.and_then(|id| ids.get(&id)) {
+                value["sessionId"] = json!(session);
+            }
+            if let Some(subsessions) = &mono.subsessions {
+                value["subsessions"] = json!(subsessions);
+            }
+            if let Some(preview) = mono.session_id.and_then(|id| previews.get(&id)) {
+                value["lastMessage"] = preview.text.clone();
+                value["lastActiveAt"] = json!(preview.updated_at);
+            }
+            if let Some(live) = live {
+                for (key, field) in live.as_object().into_iter().flatten() {
+                    if !field.is_null() {
+                        value[key] = field.clone();
                     }
                 }
-                value
-            })
-            .collect();
-        Ok::<_, String>((
-            // `monoTools`: this desktop answers the phone's Mono profile,
-            // editing, reset, delete and create; the older app doesn't,
-            // and its phones hide them. `push`: it notifies phones through
-            // Expo, so they no longer post their own alerts. `monoFiles`:
-            // it reads and saves a Mono's soul and memory for the phone.
-            json!({"projects": projects, "monos": monos, "sessions": sessions, "monoTools": true, "push": true, "monoFiles": true}),
-            ids,
-            previews,
-        ))
-
+            }
+            value
+        })
+        .collect();
+    Ok::<_, String>((
+        // `monoTools`: this desktop answers the phone's Mono profile,
+        // editing, reset, delete and create; the older app doesn't,
+        // and its phones hide them. `push`: it notifies phones through
+        // Expo, so they no longer post their own alerts. `monoFiles`:
+        // it reads and saves a Mono's soul and memory for the phone.
+        json!({"projects": projects, "monos": monos, "sessions": sessions, "monoTools": true, "push": true, "monoFiles": true}),
+        ids,
+        previews,
+    ))
 }
 
 impl Shell {
@@ -636,7 +668,6 @@ impl Shell {
             .map(|id| (id, self.session_summaries.get(&id).map(|s| s.updated_at)))
             .collect();
         CatalogInputs {
-            paths,
             projects,
             entries,
             monos,
@@ -656,9 +687,9 @@ impl Shell {
         let inputs = self.catalog_inputs(cx);
         let store = self.store.clone();
         self.mobile.publishing = true;
-        let work = cx.background_executor().spawn(async move {
-            assemble_catalog(&store, inputs).await
-        });
+        let work = cx
+            .background_executor()
+            .spawn(async move { assemble_catalog(&store, inputs).await });
         cx.spawn(async move |this, cx| {
             let result = work.await;
             let _ = this.update(cx, |this, _| {

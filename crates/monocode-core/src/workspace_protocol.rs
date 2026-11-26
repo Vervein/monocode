@@ -349,8 +349,7 @@ pub fn workspace_source_path(data_dir: &std::path::Path) -> PathBuf {
 
 pub fn read_workspace_source(data_dir: &std::path::Path) -> Option<String> {
     let raw = std::fs::read_to_string(workspace_source_path(data_dir)).ok()?;
-    serde_json::from_str::<Value>(&raw)
-        .ok()?["workspaceSourceId"]
+    serde_json::from_str::<Value>(&raw).ok()?["workspaceSourceId"]
         .as_str()
         .map(str::to_owned)
         .filter(|id| !id.is_empty())

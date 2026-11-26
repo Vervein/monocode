@@ -219,7 +219,10 @@ impl Store {
     }
 
     /// A workspace command receipt by its client-chosen id.
-    pub fn workspace_receipt(&self, command_id: &str) -> Result<Option<(String, String, Option<String>)>, String> {
+    pub fn workspace_receipt(
+        &self,
+        command_id: &str,
+    ) -> Result<Option<(String, String, Option<String>)>, String> {
         self.conn
             .execute_batch(
                 "CREATE TABLE IF NOT EXISTS workspace_receipts(command_id TEXT PRIMARY KEY,
@@ -227,13 +230,17 @@ impl Store {
                  created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL);",
             )
             .map_err(|e| e.to_string())?;
-        let found = self
-            .conn
-            .query_row(
-                "SELECT signature, status, result FROM workspace_receipts WHERE command_id=?",
-                [command_id],
-                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, Option<String>>(2)?)),
-            );
+        let found = self.conn.query_row(
+            "SELECT signature, status, result FROM workspace_receipts WHERE command_id=?",
+            [command_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<String>>(2)?,
+                ))
+            },
+        );
         match found {
             Ok(row) => Ok(Some(row)),
             Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
