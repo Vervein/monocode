@@ -38,6 +38,7 @@ struct Replica {
 }
 
 struct MonoDetail {
+    instance: u64,
     id: String,
     machine: String,
     name: String,
@@ -59,6 +60,7 @@ struct MonoDetail {
     /// are only meaningful under this identity.
     conversation: Option<i64>,
     busy: bool,
+    can_cancel: bool,
     input: Entity<Input>,
     sending: bool,
     /// An approval, question or cancel command is in flight.
@@ -84,6 +86,7 @@ pub(crate) struct Workspaces {
     selected: Option<String>,
     replicas: HashMap<String, Replica>,
     detail: Option<MonoDetail>,
+    next_detail_instance: u64,
     /// Inactive remote details keyed by machine and owner Mono identity. Tab
     /// activation swaps these in and out; only an explicit close drops one.
     details: HashMap<(String, String), MonoDetail>,
@@ -107,6 +110,7 @@ impl Workspaces {
             selected: None,
             replicas: HashMap::new(),
             detail: None,
+            next_detail_instance: 0,
             details: HashMap::new(),
             _events: Vec::new(),
         };
@@ -139,6 +143,18 @@ impl Workspaces {
             self.select(id, cx);
         }
         cx.notify();
+    }
+
+    fn detail_mut(&mut self, machine: &str, id: &str, instance: u64) -> Option<&mut MonoDetail> {
+        let active = self.detail.as_mut().filter(|detail| {
+            detail.machine == machine && detail.id == id && detail.instance == instance
+        });
+        if active.is_some() {
+            return active;
+        }
+        self.details
+            .get_mut(&(machine.to_string(), id.to_string()))
+            .filter(|detail| detail.instance == instance)
     }
 
     fn stash_detail(&mut self) {
@@ -286,7 +302,9 @@ impl Workspaces {
             self._events.push(
                 cx.subscribe(&input, |this, _, _: &input::Submitted, cx| this.send(cx)),
             );
+            self.next_detail_instance += 1;
             self.detail = Some(MonoDetail {
+                instance: self.next_detail_instance,
                 name: entry["name"].as_str().unwrap_or("Mono").to_string(),
                 color: entry["color"].as_str().unwrap_or("#888888").to_string(),
                 id: id.clone(),
@@ -298,6 +316,7 @@ impl Workspaces {
                 paged: false,
                 conversation: None,
                 busy: entry["busy"].as_bool().unwrap_or(false),
+                can_cancel: false,
                 input,
                 sending: false,
                 acting: false,
@@ -396,6 +415,7 @@ impl Workspaces {
                 }
                 if let Some(profile) = profile.as_ref() {
                     detail.busy = profile["busy"].as_bool().unwrap_or(false);
+                    detail.can_cancel = profile["canCancel"].as_bool().unwrap_or(false);
                 }
                 detail.profile = profile;
                 cx.notify();
@@ -428,6 +448,8 @@ impl Workspaces {
         detail.notice = String::new();
         let mono_id = detail.id.clone();
         let request_mono_id = mono_id.clone();
+        let request_machine_id = machine_id.clone();
+        let request_instance = detail.instance;
         let request_before = before.clone();
         let remote = self.remote.clone();
         let work = cx.background_executor().spawn(async move {
@@ -442,12 +464,9 @@ impl Workspaces {
         cx.spawn(async move |this, cx| {
             let outcome = work.await;
             let _ = this.update(cx, |this, cx| {
-                let Some(detail) = this.detail.as_mut() else {
+                let Some(detail) = this.detail_mut(&request_machine_id, &request_mono_id, request_instance) else {
                     return;
                 };
-                if detail.id != request_mono_id {
-                    return;
-                }
                 detail.loading_older = false;
                 match outcome {
                     Ok(page) => {
@@ -530,6 +549,8 @@ impl Workspaces {
             "payload": {"text": text},
         });
         let request_mono_id = mono_id.clone();
+        let request_machine_id = machine_id.clone();
+        let request_instance = self.detail.as_ref().map(|detail| detail.instance).unwrap_or(0);
         let remote = self.remote.clone();
         let machine = machine_id.clone();
         let work = cx.background_executor().spawn(async move {
@@ -542,12 +563,9 @@ impl Workspaces {
         cx.spawn(async move |this, cx| {
             let outcome = work.await;
             let _ = this.update(cx, |this, cx| {
-                let Some(detail) = this.detail.as_mut() else {
+                let Some(detail) = this.detail_mut(&request_machine_id, &request_mono_id, request_instance) else {
                     return;
                 };
-                if detail.id != request_mono_id {
-                    return;
-                }
                 detail.sending = false;
                 match outcome {
                     Ok(receipt) => {
@@ -626,6 +644,8 @@ impl Workspaces {
             "payload": payload,
         });
         let request_mono_id = mono_id.clone();
+        let request_machine_id = machine_id.clone();
+        let request_instance = detail.instance;
         let remote = self.remote.clone();
         let machine = machine_id.clone();
         let work = cx.background_executor().spawn(async move {
@@ -638,12 +658,9 @@ impl Workspaces {
         cx.spawn(async move |this, cx| {
             let outcome = work.await;
             let _ = this.update(cx, |this, cx| {
-                let Some(detail) = this.detail.as_mut() else {
+                let Some(detail) = this.detail_mut(&request_machine_id, &request_mono_id, request_instance) else {
                     return;
                 };
-                if detail.id != request_mono_id {
-                    return;
-                }
                 detail.acting = false;
                 match outcome {
                     Ok(receipt) => {
@@ -1197,7 +1214,7 @@ impl Workspaces {
                                 .text_color(content(0.45))
                                 .child(if detail.busy { "Working" } else { "Idle" }),
                         )
-                        .when(detail.busy, |d| {
+                        .when(detail.can_cancel, |d| {
                             d.child(
                                 div()
                                     .id("ws-cancel-mono")
@@ -1796,6 +1813,7 @@ mod tests {
                             json!({"result":{
                                 "status":"working",
                                 "busy":state.busy,
+                                "canCancel":state.busy,
                                 "interaction":{"waiting":true,"approvals":approvals,"question":question}
                             }})
                         }

@@ -6915,7 +6915,11 @@ impl Shell {
         if self.menu.is_some() {
             return;
         }
-        let projects = self.project_space_order();
+        let projects = if self.workspace.classic_layout && self.remote_workspaces.selected.is_none() {
+            self.workspace.visible_project_order()
+        } else {
+            self.project_space_order()
+        };
         if projects.is_empty() {
             return;
         }

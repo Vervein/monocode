@@ -225,3 +225,9 @@ Focused title tab 已有最小安全切片:
 - `monos.profile` 投影 live `busy`,remote Cancel 是否可见由 owner 实时状态决定,不再被历史页的静态 `busy:false` 覆盖。
 - 项目前进/后退快捷键和底部 space 拖拽都改用当前 Host scope 的可见项目顺序;本地拖拽在保存时把可见顺序映回完整项目列表,隐藏的 `remote://` 项目不再造成索引偏移。
 - Classic 的 Sessions 保持项目作用域: active project 属于所选 host 时使用该项目同步来的 session rows;否则提示先选择该 host 的项目。Focused 仍显示 host-wide owner Monos。
+
+## Review 修正第二轮:请求实例与取消语义(2026-11-26,编译验证)
+
+- Remote detail 的 send/action/older-page 回调携带 detail instance identity;请求在 tab 切换期间完成时会写回匹配的 active/parked detail,显式关闭后不会污染新实例。
+- `monos.profile` 区分 aggregate `busy` 与 Mono 自身对话的 `canCancel`; delegated/launch session 忙碌仍显示 Working,但只有自己对话可中断时才显示 Cancel。
+- Classic 本地 scope 的项目前进/后退恢复使用 rail 的 `visible_project_order`; remote/Focused scope 继续使用底部项目条顺序。
