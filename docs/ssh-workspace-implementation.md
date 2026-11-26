@@ -167,3 +167,14 @@ Devin Review 初审 6 项,5 项已修并回归(写路径 harness 22/22):
 - catalog 的项目身份以 `environmentId + path` 固定,不把用户使用的 SSH endpoint 当作项目身份。
 
 验证:`cd crates/monocode-gpui && cargo check --tests` 通过。未完成的下一步仍是 Focused sidebar/title tab 深度接入:本地列表结构深耦合 i64 session id,需要独立的 remote row/view-model;当前切片先保证原 project rail 能看到并进入远端对象,不把远端对象塞入本地 Mono 调度。
+
+## Host 入口低侵入调整(2026-11-26,编译验证)
+
+根据用户反馈重新调整信息架构:Host 不再放在共享顶部主导航,避免被理解成替代原项目菜单。原 Focused 项目按钮及其下拉菜单(Switch worktree / Switch project / Project settings / Open folder on a machine / Settings)保持原位。
+
+- Focused:Host 选择器放在底部项目切换图标条下方,作为一行低侵入环境控制。
+- Classic:Host 选择器放在 project rail 底部、Settings 上方。
+- Focused 底部项目图标条在 remote scope 下直接显示 owner catalog 的项目;点击图标时才通过 `projects.open` 注册并切换到对应 `remote://environment/path` 项目,不做多主机项目混排。
+- 远端 scope 下禁用底部项目图标的本地拖拽排序和本地项目右键菜单,避免把远端 catalog 对象误当成本地 project 状态。
+
+验证:`cd crates/monocode-gpui && cargo check --tests` 通过。

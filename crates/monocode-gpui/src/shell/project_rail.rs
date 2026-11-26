@@ -785,6 +785,7 @@ impl Shell {
                         .map(|prompt| div().mb_1().child(prompt)),
                 )
             })
+            .child(self.host_scope_button(compact, cx))
             .child(
                 div()
                     .id("rail-settings")

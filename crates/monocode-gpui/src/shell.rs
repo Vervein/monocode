@@ -405,8 +405,6 @@ pub(crate) struct ShellMenu {
 /// where the window has none, as in macOS fullscreen).
 const TRAFFIC_LIGHTS: f32 = if cfg!(target_os = "macos") { 78. } else { 10. };
 const NO_TRAFFIC_LIGHTS: f32 = 10.;
-/// The short host name slot reserved in the shared title navigation.
-const HOST_PICKER_WIDTH: f32 = 78.;
 // The tab strip's padding; the trailing side also has the 2px gap before the
 // strip's drag area.
 const STRIP_LEAD: f32 = 6.;
@@ -4716,7 +4714,7 @@ impl Shell {
         }
     }
     fn navigation_width(&self) -> f32 {
-        let closed = self.traffic_lights() + 3. * 24. + HOST_PICKER_WIDTH;
+        let closed = self.traffic_lights() + 3. * 24.;
         if self.workspace.classic_layout {
             return if self.workspace.project_rail_open || self.settings.is_some() {
                 self.project_rail_drawn_width().max(closed + 6.)
@@ -4731,11 +4729,11 @@ impl Shell {
     fn strip_lead(&self, cx: &App) -> f32 {
         (self.navigation_width() - self.left_sidebar_width(cx)).max(0.)
     }
-    /// The host scope control keeps the original navigation in place: it
-    /// sits directly after the sidebar toggle and never becomes a second
-    /// toolbar row. Its width is reserved even when the sidebar is closed,
-    /// so the history arrows cannot slide under it.
-    fn host_picker_button(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+    /// The host scope control lives at the bottom of project navigation,
+    /// below the project switching controls. It is deliberately quiet chrome:
+    /// projects remain the primary object, with the host only scoping which
+    /// projects and Monos are shown.
+    fn host_scope_button(&self, compact: bool, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
         let selected = self.remote_workspaces.selected.clone();
         let machine = selected.as_ref().and_then(|id| {
             self.remote
@@ -4776,10 +4774,10 @@ impl Shell {
             .aria_label(description)
             .aria_expanded(self.menu_open(&MenuTarget::HostPicker))
             .cursor_pointer()
-            .w(px(HOST_PICKER_WIDTH))
-            .h(px(24.))
-            .mx(px(2.))
-            .px_1()
+            .when(compact, |d| d.w(px(32.)).justify_center())
+            .when(!compact, |d| d.w_full())
+            .h(px(26.))
+            .px_2()
             .rounded_md()
             .flex_shrink_0()
             .flex()
@@ -4789,12 +4787,14 @@ impl Shell {
             .text_color(content(0.65))
             .hover(|s| s.bg(content(0.08)).text_color(content(1.)))
             .child(icon("globe", 13.).flex_shrink_0())
-            .child(div().flex_1().min_w_0().truncate().child(label))
-            .child(
-                icon("chevron-down", 11.)
-                    .flex_shrink_0()
-                    .text_color(content(0.4)),
-            )
+            .when(!compact, |d| {
+                d.child(div().flex_1().min_w_0().truncate().child(label))
+                    .child(
+                        icon("chevron-down", 11.)
+                            .flex_shrink_0()
+                            .text_color(content(0.4)),
+                    )
+            })
             .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
             .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
                 if this.menu_open(&MenuTarget::HostPicker) {
@@ -4809,7 +4809,7 @@ impl Shell {
                 }
             }))
     }
-    /// The traffic lights, sidebar toggle, host picker and visit arrows,
+    /// The traffic lights, sidebar toggle and visit arrows,
     /// spanning the open sidebar so the arrows sit at its edge.
     fn navigation(&self, cx: &mut Context<Self>) -> gpui::Div {
         div()
@@ -4837,7 +4837,6 @@ impl Shell {
                     .flex_shrink_0(),
             )
             .child(self.sidebar_toggle(cx))
-            .child(self.host_picker_button(cx))
             .child(titlebar_drag_area().flex_1())
             .child(
                 icon_button_enabled(
@@ -7122,7 +7121,16 @@ impl Shell {
                 ),
             )
             .when(!self.workspace.classic_layout, |d| {
-                d.child(self.project_spaces(cx))
+                d.child(self.project_spaces(cx)).child(
+                    div()
+                        .h(px(31.))
+                        .flex_shrink_0()
+                        .border_t_1()
+                        .border_color(content(0.08))
+                        .px_2()
+                        .py(px(2.))
+                        .child(self.host_scope_button(false, cx)),
+                )
             })
             .when_some(self.session_preview.as_ref(), |d, preview| {
                 let id = preview.id;
@@ -7172,15 +7180,57 @@ impl Shell {
             .into_any()
     }
 
+    fn project_space_paths(&self) -> Vec<String> {
+        if let Some((machine_id, replica)) = self.selected_workspace_replica()
+            && replica.usable()
+            && let Some(catalog) = self.remote_workspace_catalog(machine_id)
+        {
+            return catalog["projects"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|entry| entry["path"].as_str().map(str::to_owned))
+                .collect();
+        }
+        self.workspace.projects.clone()
+    }
+
+    fn remote_project_entry_by_path(&self, path: &str) -> Option<(String, serde_json::Value)> {
+        let machine_id = self.remote_workspaces.selected.clone()?;
+        let catalog = self.remote_workspace_catalog(&machine_id)?;
+        let entry = catalog["projects"]
+            .as_array()?
+            .iter()
+            .find(|entry| entry["path"].as_str() == Some(path))?
+            .clone();
+        Some((machine_id, entry))
+    }
+
+    fn project_space_active(&self, path: &str) -> bool {
+        if self.workspace.project == path {
+            return true;
+        }
+        let Some((_, replica)) = self.selected_workspace_replica() else {
+            return false;
+        };
+        let prefix = format!("remote://{}", replica.environment_id);
+        self.workspace.project.strip_prefix(&prefix) == Some(path)
+    }
+
     fn project_spaces(&mut self, cx: &mut Context<Self>) -> AnyElement {
         // Sidebar.tsx's ProjectSpacesBar: five equal spaces, paged by chevrons.
-        let shown = self.workspace.projects.len().min(5);
-        let last = self.workspace.projects.len().saturating_sub(shown);
+        let remote_scope = self.remote_workspaces.selected.is_some();
+        let paths = self.project_space_paths();
+        let shown = paths.len().min(5);
+        let last = paths.len().saturating_sub(shown);
         self.spaces_start = self.spaces_start.min(last);
         let first = self.spaces_start;
-        let projects: Vec<_> = self
-            .space_reorder
-            .order(&self.workspace.projects)
+        let ordered = if remote_scope {
+            paths
+        } else {
+            self.space_reorder.order(&paths)
+        };
+        let projects: Vec<_> = ordered
             .into_iter()
             .enumerate()
             .skip(first)
@@ -7276,7 +7326,7 @@ impl Shell {
                     .gap_1()
                     .child(self.space_reorder.strip.probe())
                     .children(projects.into_iter().map(|(ix, path)| {
-                        let active = path == self.workspace.project;
+                        let active = self.project_space_active(&path);
                         let hovered = self.hovered_space.as_ref() == Some(&path);
                         let dragging = self.space_reorder.dragging(&path);
                         let offset = self.space_reorder.offset(&path, ix, first);
@@ -7320,12 +7370,17 @@ impl Shell {
                             .on_mouse_down(MouseButton::Left, {
                                 let path = path.clone();
                                 cx.listener(move |this, event: &MouseDownEvent, _, _| {
-                                    this.start_space_drag(&path, event);
+                                    if !remote_scope {
+                                        this.start_space_drag(&path, event);
+                                    }
                                 })
                             })
                             .on_mouse_down(MouseButton::Right, {
                                 let path = path.clone();
                                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                    if remote_scope {
+                                        return;
+                                    }
                                     let anchor = Anchor::Point(event.position);
                                     // Spaces have no pins or groups to offer.
                                     let target = MenuTarget::Project {
@@ -7341,7 +7396,15 @@ impl Shell {
                                 }
                                 // The tip steps aside once a space is clicked.
                                 this.hovered_space = None;
-                                this.select_project(path.clone(), window, cx)
+                                if remote_scope {
+                                    if let Some((machine_id, entry)) =
+                                        this.remote_project_entry_by_path(&path)
+                                    {
+                                        this.open_remote_workspace_project(machine_id, entry, cx);
+                                    }
+                                } else {
+                                    this.select_project(path.clone(), window, cx)
+                                }
                             }))
                     })),
             )
