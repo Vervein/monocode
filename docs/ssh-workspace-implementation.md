@@ -174,7 +174,7 @@ Devin Review 初审 6 项,5 项已修并回归(写路径 harness 22/22):
 
 - Focused:Host 选择器放在底部项目切换图标条下方,作为一行低侵入环境控制。
 - Classic:Host 选择器放在 project rail 底部、Settings 上方。
-- Focused 底部项目图标条在 remote scope 下直接显示 owner catalog 的项目;点击图标时才通过 `projects.open` 注册并切换到对应 `remote://environment/path` 项目,不做多主机项目混排。
+- Focused 底部项目图标条在 remote scope 下直接显示 owner catalog 的项目;点击图标时才通过 `projects.open` 注册并切换到对应 `remote://environment/path` 项目,不做多主机项目混排；本机 scope 只显示本机项目,已注册 remote:// 项目也只在其 Host scope 出现。
 - 远端 scope 下禁用底部项目图标的本地拖拽排序和本地项目右键菜单,避免把远端 catalog 对象误当成本地 project 状态。
 
 验证:`cd crates/monocode-gpui && cargo check --tests` 通过。

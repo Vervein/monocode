@@ -7181,18 +7181,25 @@ impl Shell {
     }
 
     fn project_space_paths(&self) -> Vec<String> {
-        if let Some((machine_id, replica)) = self.selected_workspace_replica()
-            && replica.usable()
-            && let Some(catalog) = self.remote_workspace_catalog(machine_id)
-        {
-            return catalog["projects"]
-                .as_array()
-                .into_iter()
-                .flatten()
-                .filter_map(|entry| entry["path"].as_str().map(str::to_owned))
-                .collect();
+        if let Some((machine_id, replica)) = self.selected_workspace_replica() {
+            if replica.usable()
+                && let Some(catalog) = self.remote_workspace_catalog(machine_id)
+            {
+                return catalog["projects"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|entry| entry["path"].as_str().map(str::to_owned))
+                    .collect();
+            }
+            return Vec::new();
         }
-        self.workspace.projects.clone()
+        self.workspace
+            .projects
+            .iter()
+            .filter(|path| !path.starts_with("remote://"))
+            .cloned()
+            .collect()
     }
 
     fn remote_project_entry_by_path(&self, path: &str) -> Option<(String, serde_json::Value)> {
