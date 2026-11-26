@@ -231,3 +231,8 @@ Focused title tab 已有最小安全切片:
 - Remote detail 的 send/action/older-page 回调携带 detail instance identity;请求在 tab 切换期间完成时会写回匹配的 active/parked detail,显式关闭后不会污染新实例。
 - `monos.profile` 区分 aggregate `busy` 与 Mono 自身对话的 `canCancel`; delegated/launch session 忙碌仍显示 Working,但只有自己对话可中断时才显示 Cancel。
 - Classic 本地 scope 的项目前进/后退恢复使用 rail 的 `visible_project_order`; remote/Focused scope 继续使用底部项目条顺序。
+
+## Review 修正第三轮:Classic rail 的 Host 成员一致性(2026-11-26,编译验证)
+
+- Classic 本地 rail、项目移动菜单和键盘 Previous/Next 统一只使用 local-visible projects;隐藏的 `remote://` 存档不再成为移动目标或快捷键目标。
+- Host scope 的项目列表由 owner catalog projects 加上该 environment 已保存的 client remote folders 组成,按 path 去重;catalog 未收录但用户曾打开的 host folder 仍能回到 rail/底部项目条。

@@ -645,12 +645,20 @@ impl Workspace {
     /// pinned projects, then each group's members, then the rest.
     pub fn visible_project_order(&self) -> Vec<String> {
         if !self.classic_layout {
-            return self.projects.clone();
+            return self
+                .projects
+                .iter()
+                .filter(|path| !path.starts_with("remote://"))
+                .cloned()
+                .collect();
         }
-        let unpinned = |p: &&String| !self.project_rail_pinned.contains(*p);
+        let unpinned = |p: &&String| {
+            !p.starts_with("remote://") && !self.project_rail_pinned.contains(*p)
+        };
         let mut order: Vec<String> = self
             .projects
             .iter()
+            .filter(|path| !path.starts_with("remote://"))
             .filter(|p| self.project_rail_pinned.contains(*p))
             .cloned()
             .collect();

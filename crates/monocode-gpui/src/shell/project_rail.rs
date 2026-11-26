@@ -18,7 +18,7 @@ enum ProjectRailRow {
     Project { path: String, grouped: bool },
     RemoteStatus,
     RemoteMono(String),
-    RemoteProject(String),
+    RemoteProject(serde_json::Value),
     Gap,
     Empty,
 }
@@ -355,14 +355,9 @@ impl Shell {
                 }
                 rows.push(ProjectRailRow::Heading("Projects"));
                 let mut count = 0;
-                for id in catalog["projects"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|entry| entry["id"].as_str().map(str::to_owned))
-                {
+                for entry in self.remote_workspace_project_entries(&machine_id) {
                     count += 1;
-                    rows.push(ProjectRailRow::RemoteProject(id));
+                    rows.push(ProjectRailRow::RemoteProject(entry));
                 }
                 if count == 0 {
                     rows.push(ProjectRailRow::Empty);
@@ -476,7 +471,9 @@ impl Shell {
             }
             ProjectRailRow::RemoteStatus => self.remote_workspace_status_row(compact, cx),
             ProjectRailRow::RemoteMono(id) => self.remote_workspace_mono_row(id, compact, cx),
-            ProjectRailRow::RemoteProject(id) => self.remote_workspace_project_row(id, compact, cx),
+            ProjectRailRow::RemoteProject(entry) => {
+                self.remote_workspace_project_row(entry, compact, cx)
+            }
             ProjectRailRow::Group(id) => self.project_rail_group_header(id, cx),
             ProjectRailRow::Gap => div().h(px(8.)).into_any(),
             ProjectRailRow::Empty => div()
@@ -654,13 +651,14 @@ impl Shell {
 
     fn remote_workspace_project_row(
         &mut self,
-        id: String,
+        entry: serde_json::Value,
         compact: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let Some((machine_id, entry)) = self.remote_workspace_entry("projects", &id) else {
+        let Some(machine_id) = self.remote_workspaces.selected.clone() else {
             return div().into_any();
         };
+        let id = entry["id"].as_str().unwrap_or("project").to_string();
         let path = entry["path"].as_str().unwrap_or_default().to_string();
         let name = entry["name"]
             .as_str()

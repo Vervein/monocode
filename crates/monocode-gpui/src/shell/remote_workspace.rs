@@ -164,6 +164,46 @@ impl Shell {
             .as_ref()
     }
 
+
+    /// Catalog projects plus client-remembered SSH folders for this machine.
+    /// The owner catalog is authoritative for owner projects, but host-level
+    /// folders opened through the folder picker can exist before the owner has
+    /// ever opened them; they still belong to this host scope.
+    pub(super) fn remote_workspace_project_entries(&self, machine_id: &str) -> Vec<Value> {
+        let mut entries = self
+            .remote_workspace_catalog(machine_id)
+            .and_then(|catalog| catalog["projects"].as_array().cloned())
+            .unwrap_or_default();
+        let Some(environment_id) = self
+            .remote_workspaces
+            .replicas
+            .get(machine_id)
+            .map(|replica| replica.environment_id.as_str())
+            .filter(|id| !id.is_empty())
+        else {
+            return entries;
+        };
+        let prefix = format!("remote://{environment_id}");
+        for key in &self.workspace.projects {
+            let Some(path) = key.strip_prefix(&prefix) else {
+                continue;
+            };
+            if !path.starts_with('/')
+                || entries.iter().any(|entry| entry["path"].as_str() == Some(path))
+            {
+                continue;
+            }
+            let name = path.rsplit('/').next().unwrap_or(path);
+            entries.push(json!({
+                "id": format!("saved:{path}"),
+                "path": path,
+                "name": name,
+                "branch": "",
+            }));
+        }
+        entries
+    }
+
     /// Opens a catalog Mono through the remote workspace surface. The detail
     /// remains a remote view model: it is backed by workspace commands and
     /// never enters the local Mono manager or scheduler.
