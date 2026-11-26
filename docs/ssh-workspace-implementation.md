@@ -156,3 +156,14 @@ Devin Review 初审 6 项,5 项已修并回归(写路径 harness 22/22):
 6. 历史不可向前翻页 → escalated(简版 transcript 范围外,打磨批次决策)
 
 测试代理 UI 端到端(录制证据在 PR #1 评论):catalog/详情/首轮发送/断连/重连/返回/本地隔离全部 PASS;重连后第二条消息 receipt completed 且确认入 outbox,但因测试环境无 provider 首条消息阻塞,transcript 按设计只渲染 store 行故不可见——环境限制非缺陷。遗留观察:outbox 排队消息不进 transcript(打磨批次可评估 monos.history 投影是否含 pending)。
+
+## 原布局主机作用域切片(2026-11-26,编译验证)
+
+本批把 host scope 从 Machines 独立页面向原 Monocode 布局推进了一步:
+
+- 两种布局共用导航条在侧栏开关后加入主机选择器;本机与已配置 SSH 主机同菜单切换,并提供 Add SSH host / Manage connections 入口。
+- shell 维护 `remote_workspaces.selected` 作为全局主机作用域;选择主机后启动/复用 workspace catalog 同步,poll 更新会同时 invalidate project rail 与 session sidebar。
+- Classic project rail 在远端作用域下直接渲染 owner catalog 的 Mono 与 Project 行:Mono 行打开既有远程 workspace detail(命令式、无本地调度副作用);Project 行首次点击时才调用 `projects.open` 注册 host project,随后复用现有 `remote://environment/path` 项目执行链路。
+- catalog 的项目身份以 `environmentId + path` 固定,不把用户使用的 SSH endpoint 当作项目身份。
+
+验证:`cd crates/monocode-gpui && cargo check --tests` 通过。未完成的下一步仍是 Focused sidebar/title tab 深度接入:本地列表结构深耦合 i64 session id,需要独立的 remote row/view-model;当前切片先保证原 project rail 能看到并进入远端对象,不把远端对象塞入本地 Mono 调度。

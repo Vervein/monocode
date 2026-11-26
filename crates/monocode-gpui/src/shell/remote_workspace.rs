@@ -21,6 +21,9 @@ pub(super) struct WorkspaceReplica {
     /// The last complete catalog page, exactly as the owner projected it.
     pub(super) catalog: Option<Value>,
     pub(super) catalog_revision: u64,
+    /// The environment the host reported for this machine. Project keys pin
+    /// this identity, rather than the SSH endpoint the user happened to use.
+    pub(super) environment_id: String,
     /// The machine is reachable but its workspace is not (unbound, owner
     /// down): distinct from a transport failure, which keeps the replica.
     pub(super) detail: String,
@@ -91,6 +94,7 @@ impl Shell {
                 replica.owner_epoch = poll.owner_epoch;
                 replica.capabilities = poll.capabilities;
                 replica.detail = poll.detail;
+                replica.environment_id = poll.environment_id;
                 if let Some(catalog) = poll.catalog {
                     replica.catalog_revision = catalog
                         .get("catalogRevision")
@@ -107,7 +111,34 @@ impl Shell {
                 replica.detail = error;
             }
         }
+        self.sidebar_list.invalidate_structure();
+        self.invalidate_chrome(cx);
         cx.notify();
+    }
+
+    /// Selects the workspace scope used by the original navigation. `None`
+    /// is this machine; a machine id scopes the rails to that workspace's
+    /// catalog without making its objects local scheduler state.
+    pub(super) fn select_workspace_scope(
+        &mut self,
+        machine_id: Option<String>,
+        cx: &mut Context<Self>,
+    ) {
+        if self.remote_workspaces.selected == machine_id {
+            return;
+        }
+        self.remote_workspaces.selected = machine_id.clone();
+        if let Some(machine_id) = machine_id {
+            self.sync_remote_workspace(&machine_id, cx);
+        }
+        self.sidebar_list.invalidate_structure();
+        self.invalidate_chrome(cx);
+        cx.notify();
+    }
+
+    pub(super) fn selected_workspace_replica(&self) -> Option<(&str, &WorkspaceReplica)> {
+        let machine_id = self.remote_workspaces.selected.as_deref()?;
+        Some((machine_id, self.remote_workspaces.replicas.get(machine_id)?))
     }
 
     /// The projects a machine's workspace reports, as the catalog projects
@@ -116,6 +147,79 @@ impl Shell {
     pub(super) fn remote_workspace_catalog(&self, machine_id: &str) -> Option<&Value> {
         self.remote_workspaces.replicas.get(machine_id)?.catalog.as_ref()
     }
+
+    /// Opens a catalog Mono through the remote workspace surface. The detail
+    /// remains a remote view model: it is backed by workspace commands and
+    /// never enters the local Mono manager or scheduler.
+    pub(super) fn open_remote_workspace_mono(
+        &mut self,
+        machine_id: String,
+        entry: Value,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.open_machines(window, cx);
+        if let Some(view) = self.machines.clone() {
+            view.update(cx, |view, cx| {
+                view.open_machine_mono_entry(machine_id, entry, cx)
+            });
+        }
+    }
+
+    /// Opens a catalog project through the existing remote-project runtime.
+    /// Registration happens only after the user picks the project; the rail's
+    /// read-only catalog sync itself never writes host project state.
+    pub(super) fn open_remote_workspace_project(
+        &mut self,
+        machine_id: String,
+        entry: Value,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(path) = entry["path"].as_str().map(str::to_owned) else {
+            return;
+        };
+        let environment_id = self
+            .remote_workspaces
+            .replicas
+            .get(&machine_id)
+            .map(|replica| replica.environment_id.clone())
+            .filter(|id| !id.is_empty())
+            .or_else(|| {
+                self.remote
+                    .list()
+                    .ok()
+                    .and_then(|machines| {
+                        machines
+                            .into_iter()
+                            .find(|machine| machine.id == machine_id)
+                            .map(|machine| machine.environment_id)
+                    })
+            });
+        let Some(environment_id) = environment_id else {
+            self.error = Some("The machine's environment identity is not known yet".into());
+            cx.notify();
+            return;
+        };
+        let remote = self.remote.clone();
+        let store = self.store.clone();
+        let machine = machine_id.clone();
+        let work = cx.background_executor().spawn(async move {
+            let project = remote.request(&machine, "projects.open", json!({"cwd": path}))?;
+            let remembered = locked(&store)?.remember_remote_project(&environment_id, &project)?;
+            Ok::<_, String>(remembered.key)
+        });
+        cx.spawn(async move |this, cx| {
+            let result = work.await;
+            let _ = this.update_in(cx, |this, window, cx| match result {
+                Ok(key) => this.select_project(key, window, cx),
+                Err(error) => {
+                    this.error = Some(error);
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
 }
 
 struct Poll {
@@ -123,6 +227,7 @@ struct Poll {
     source_id: Option<String>,
     owner_epoch: String,
     capabilities: Vec<String>,
+    environment_id: String,
     detail: String,
     catalog: Option<Value>,
 }
@@ -146,6 +251,7 @@ fn poll_workspace_once(remote: &Arc<monocode_core::remote::Connections>, machine
         source_id: workspace["workspaceSourceId"].as_str().map(str::to_owned),
         owner_epoch: workspace["ownerEpoch"].as_str().unwrap_or_default().to_string(),
         capabilities: capabilities.clone(),
+        environment_id: describe["environmentId"].as_str().unwrap_or_default().to_string(),
         detail: workspace["detail"].as_str().unwrap_or_default().to_string(),
         catalog: None,
     };

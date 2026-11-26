@@ -119,6 +119,21 @@ impl Workspaces {
         cx.notify();
     }
 
+    /// Opens a catalog entry chosen from the shell's host-scoped navigation.
+    /// The entry already came from the owner's catalog, so the detail can
+    /// render immediately while this view's own replica catches up.
+    pub(crate) fn open_machine_mono_entry(
+        &mut self,
+        machine_id: String,
+        entry: Value,
+        cx: &mut Context<Self>,
+    ) {
+        if self.selected.as_deref() != Some(machine_id.as_str()) {
+            self.select(machine_id, cx);
+        }
+        self.open_mono(&entry, cx);
+    }
+
     /// The per-machine sync loop: describe, refill the catalog when the
     /// owner is ready, repeat. Blocking host RPCs live on the background
     /// executor; only their results touch the view.

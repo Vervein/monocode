@@ -374,6 +374,8 @@ pub(crate) enum MenuTarget {
     /// The original project rail's local or remote folder menu.
     ProjectRailAdd,
     CompactProjectPicker,
+    /// The title navigation's host scope picker.
+    HostPicker,
     ProjectRailGroup(String),
     SessionFilter,
     SidebarOptions,
@@ -403,6 +405,8 @@ pub(crate) struct ShellMenu {
 /// where the window has none, as in macOS fullscreen).
 const TRAFFIC_LIGHTS: f32 = if cfg!(target_os = "macos") { 78. } else { 10. };
 const NO_TRAFFIC_LIGHTS: f32 = 10.;
+/// The short host name slot reserved in the shared title navigation.
+const HOST_PICKER_WIDTH: f32 = 78.;
 // The tab strip's padding; the trailing side also has the 2px gap before the
 // strip's drag area.
 const STRIP_LEAD: f32 = 6.;
@@ -4712,7 +4716,7 @@ impl Shell {
         }
     }
     fn navigation_width(&self) -> f32 {
-        let closed = self.traffic_lights() + 3. * 24.;
+        let closed = self.traffic_lights() + 3. * 24. + HOST_PICKER_WIDTH;
         if self.workspace.classic_layout {
             return if self.workspace.project_rail_open || self.settings.is_some() {
                 self.project_rail_drawn_width().max(closed + 6.)
@@ -4727,8 +4731,86 @@ impl Shell {
     fn strip_lead(&self, cx: &App) -> f32 {
         (self.navigation_width() - self.left_sidebar_width(cx)).max(0.)
     }
-    /// The traffic lights, sidebar toggle and visit arrows, spanning the
-    /// open sidebar so the arrows sit at its edge.
+    /// The host scope control keeps the original navigation in place: it
+    /// sits directly after the sidebar toggle and never becomes a second
+    /// toolbar row. Its width is reserved even when the sidebar is closed,
+    /// so the history arrows cannot slide under it.
+    fn host_picker_button(&self, cx: &mut Context<Self>) -> gpui::Stateful<gpui::Div> {
+        let selected = self.remote_workspaces.selected.clone();
+        let machine = selected.as_ref().and_then(|id| {
+            self.remote
+                .list()
+                .ok()
+                .and_then(|machines| machines.into_iter().find(|machine| &machine.id == id))
+        });
+        let label = match (selected.as_ref(), machine) {
+            (Some(_), Some(machine)) => machine.name,
+            (Some(_), None) => "Machine".to_string(),
+            (None, _) if cfg!(target_os = "macos") => "This Mac".to_string(),
+            (None, _) => "This computer".to_string(),
+        };
+        let (offline, readiness, detail) = selected
+            .as_ref()
+            .and_then(|id| self.remote_workspaces.replicas.get(id))
+            .map(|replica| {
+                (
+                    replica.offline,
+                    replica.readiness.clone(),
+                    replica.detail.clone(),
+                )
+            })
+            .unwrap_or((false, "local".into(), String::new()));
+        let description = if offline {
+            format!("{label}, offline")
+        } else if readiness == "ready" || readiness == "local" {
+            format!("{label}, current host")
+        } else if detail.is_empty() {
+            format!("{label}, workspace {readiness}")
+        } else {
+            format!("{label}, workspace {readiness}: {detail}")
+        };
+        div()
+            .id("host-picker")
+            .debug_selector(|| "host-picker".into())
+            .role(Role::Button)
+            .aria_label(description)
+            .aria_expanded(self.menu_open(&MenuTarget::HostPicker))
+            .cursor_pointer()
+            .w(px(HOST_PICKER_WIDTH))
+            .h(px(24.))
+            .mx(px(2.))
+            .px_1()
+            .rounded_md()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap_1()
+            .text_size(px(11.))
+            .text_color(content(0.65))
+            .hover(|s| s.bg(content(0.08)).text_color(content(1.)))
+            .child(icon("globe", 13.).flex_shrink_0())
+            .child(div().flex_1().min_w_0().truncate().child(label))
+            .child(
+                icon("chevron-down", 11.)
+                    .flex_shrink_0()
+                    .text_color(content(0.4)),
+            )
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
+                if this.menu_open(&MenuTarget::HostPicker) {
+                    this.close_menu(cx);
+                } else {
+                    this.open_menu(
+                        MenuTarget::HostPicker,
+                        Anchor::Point(event.position()),
+                        window,
+                        cx,
+                    );
+                }
+            }))
+    }
+    /// The traffic lights, sidebar toggle, host picker and visit arrows,
+    /// spanning the open sidebar so the arrows sit at its edge.
     fn navigation(&self, cx: &mut Context<Self>) -> gpui::Div {
         div()
             .w(px(self.navigation_width()))
@@ -4755,6 +4837,7 @@ impl Shell {
                     .flex_shrink_0(),
             )
             .child(self.sidebar_toggle(cx))
+            .child(self.host_picker_button(cx))
             .child(titlebar_drag_area().flex_1())
             .child(
                 icon_button_enabled(
@@ -5618,6 +5701,56 @@ impl Shell {
                 230.,
                 MenuStyle::Explorer,
             ),
+            MenuTarget::HostPicker => {
+                let machines = self.remote.list().unwrap_or_default();
+                let local_label = if cfg!(target_os = "macos") {
+                    "This Mac"
+                } else {
+                    "This computer"
+                };
+                let mut items = vec![
+                    MenuAction::new("host:local", local_label)
+                        .icon("desktop")
+                        .checked(self.remote_workspaces.selected.is_none())
+                        .into(),
+                ];
+                items.extend(machines.iter().map(|machine| {
+                    let replica = self.remote_workspaces.replicas.get(&machine.id);
+                    let status = replica
+                        .map(|replica| {
+                            if replica.offline {
+                                "Offline — showing the last known workspace".to_string()
+                            } else if replica.readiness == "ready" {
+                                "Workspace ready".to_string()
+                            } else if replica.detail.is_empty() {
+                                format!("Workspace {}", replica.readiness)
+                            } else {
+                                replica.detail.clone()
+                            }
+                        })
+                        .unwrap_or_else(|| "Not synced yet".into());
+                    MenuAction::new(format!("host:{}", machine.id), machine.name.clone())
+                        .icon("globe")
+                        .description(status)
+                        .checked(self.remote_workspaces.selected.as_deref() == Some(&machine.id))
+                        .into()
+                }));
+                items.extend([
+                    MenuItem::Separator,
+                    MenuAction::new("add-ssh-host", "Add SSH host…")
+                        .icon("plus")
+                        .into(),
+                    MenuAction::new("manage-connections", "Manage connections…")
+                        .icon("settings")
+                        .into(),
+                ]);
+                (
+                    "Choose host".into(),
+                    items,
+                    280.,
+                    MenuStyle::Switcher,
+                )
+            }
             MenuTarget::CompactProjectPicker => {
                 let (monos, active) = self
                     .monos
@@ -5922,6 +6055,16 @@ impl Shell {
                 _ => {}
             },
             MenuTarget::CompactProjectPicker => {}
+            MenuTarget::HostPicker => match action {
+                "host:local" => self.select_workspace_scope(None, cx),
+                "add-ssh-host" | "manage-connections" => {
+                    self.open_settings(crate::settings::Section::Connections, window, cx)
+                }
+                action if action.starts_with("host:") => {
+                    self.select_workspace_scope(Some(action.trim_start_matches("host:").to_string()), cx)
+                }
+                _ => {}
+            },
             MenuTarget::ProjectRailGroup(id) => {
                 if action == "delete-project-group" {
                     self.workspace.project_rail_groups.retain(|g| g.id != id);
