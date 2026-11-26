@@ -377,7 +377,13 @@ impl Shell {
         if self.workspace.preferences.monos {
             rows.push(ProjectRailRow::Monos);
         }
-        let projects = &self.workspace.projects;
+        let projects: Vec<_> = self
+            .workspace
+            .projects
+            .iter()
+            .filter(|path| !path.starts_with("remote://"))
+            .cloned()
+            .collect();
         let pinned: Vec<_> = projects
             .iter()
             .filter(|p| self.workspace.project_rail_pinned.contains(*p))
@@ -420,7 +426,7 @@ impl Shell {
         }
         rows.push(ProjectRailRow::Heading("Projects"));
         let mut count = 0;
-        for path in projects {
+        for path in &projects {
             let grouped = self
                 .workspace
                 .project_rail_assignments
