@@ -32,6 +32,7 @@ mod quick_open;
 mod rails;
 mod remote_projects;
 mod remote_sessions;
+mod remote_workspace;
 mod search;
 mod session_filters;
 mod session_folders;
@@ -46,6 +47,7 @@ mod sidebar_peek;
 mod space_reorder;
 mod terminal_dock;
 mod terminal_panes;
+mod workspace_host;
 use terminal_panes::terminal_drag_ghost;
 mod title_tabs;
 #[cfg(any(target_os = "linux", target_os = "windows"))]
@@ -363,6 +365,7 @@ fn adjacent<T: PartialEq + Clone>(items: &[T], current: Option<&T>, step: isize)
 pub(crate) enum MenuTarget {
     Tab(i64),
     MonoTab(String),
+    RemoteMonoTab(String, String),
     SearchTab,
     AppTab(app_views::AppView),
     Session(i64),
@@ -372,6 +375,8 @@ pub(crate) enum MenuTarget {
     /// The original project rail's local or remote folder menu.
     ProjectRailAdd,
     CompactProjectPicker,
+    /// The title navigation's host scope picker.
+    HostPicker,
     ProjectRailGroup(String),
     SessionFilter,
     SidebarOptions,
@@ -614,6 +619,8 @@ pub(crate) struct Shell {
     image_lightbox: Option<(Entity<crate::image_lightbox::ImageLightbox>, Subscription)>,
     app_bridge: Option<monocode_core::mono::bridge::Server>,
     mobile: mobile_host::Mobile,
+    workspace_host: workspace_host::Workspace,
+    remote_workspaces: remote_workspace::RemoteWorkspaces,
     app_results: HashMap<(i64, String), (String, Result<serde_json::Value, String>)>,
     app_pending: HashSet<(i64, String)>,
     orchestrations: HashMap<i64, orchestration::Run>,
@@ -718,6 +725,7 @@ pub(crate) struct Shell {
     note_count: Option<usize>,
     inbox: Option<Entity<crate::inbox::Inbox>>,
     automations: Option<Entity<crate::automations::Automations>>,
+    machines: Option<Entity<crate::workspaces::Workspaces>>,
     active_app_view: Option<app_views::AppView>,
     app_view_events: Vec<Subscription>,
     automation_state: automation_runs::State,
@@ -1018,6 +1026,8 @@ impl Shell {
             image_lightbox: None,
             app_bridge: None,
             mobile: mobile_host::Mobile::default(),
+            workspace_host: workspace_host::Workspace::default(),
+            remote_workspaces: remote_workspace::RemoteWorkspaces::default(),
             app_results: HashMap::new(),
             app_pending: HashSet::new(),
             orchestrations: HashMap::new(),
@@ -1103,6 +1113,7 @@ impl Shell {
             note_count: None,
             inbox: None,
             automations: None,
+            machines: None,
             active_app_view: None,
             app_view_events: Vec::new(),
             automation_state: Default::default(),
@@ -1304,6 +1315,7 @@ impl Shell {
             this.session_summaries.insert(summary.id, summary);
         }
         this.init_mobile_host(cx);
+        this.init_workspace_host(cx);
         if let Some(id) = this.workspace.active {
             this.ensure_session(this.workspace.session_for_pane(id), cx);
             this.record_worktree_session(id, cx);
@@ -4718,8 +4730,92 @@ impl Shell {
     fn strip_lead(&self, cx: &App) -> f32 {
         (self.navigation_width() - self.left_sidebar_width(cx)).max(0.)
     }
-    /// The traffic lights, sidebar toggle and visit arrows, spanning the
-    /// open sidebar so the arrows sit at its edge.
+    /// The host scope control lives at the bottom of project navigation,
+    /// below the project switching controls. It is deliberately quiet chrome:
+    /// projects remain the primary object, with the host only scoping which
+    /// projects and Monos are shown.
+    fn host_scope_button(
+        &self,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let selected = self.remote_workspaces.selected.clone();
+        let machine = selected.as_ref().and_then(|id| {
+            self.remote
+                .list()
+                .ok()
+                .and_then(|machines| machines.into_iter().find(|machine| &machine.id == id))
+        });
+        let label = match (selected.as_ref(), machine) {
+            (Some(_), Some(machine)) => machine.name,
+            (Some(_), None) => "Machine".to_string(),
+            (None, _) if cfg!(target_os = "macos") => "This Mac".to_string(),
+            (None, _) => "This computer".to_string(),
+        };
+        let (offline, readiness, detail) = selected
+            .as_ref()
+            .and_then(|id| self.remote_workspaces.replicas.get(id))
+            .map(|replica| {
+                (
+                    replica.offline,
+                    replica.readiness.clone(),
+                    replica.detail.clone(),
+                )
+            })
+            .unwrap_or((false, "local".into(), String::new()));
+        let description = if offline {
+            format!("{label}, offline")
+        } else if readiness == "ready" || readiness == "local" {
+            format!("{label}, current host")
+        } else if detail.is_empty() {
+            format!("{label}, workspace {readiness}")
+        } else {
+            format!("{label}, workspace {readiness}: {detail}")
+        };
+        div()
+            .id("host-picker")
+            .debug_selector(|| "host-picker".into())
+            .role(Role::Button)
+            .aria_label(description)
+            .aria_expanded(self.menu_open(&MenuTarget::HostPicker))
+            .cursor_pointer()
+            .when(compact, |d| d.w(px(32.)).justify_center())
+            .when(!compact, |d| d.w_full())
+            .h(px(26.))
+            .px_2()
+            .rounded_md()
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .gap_1()
+            .text_size(px(11.))
+            .text_color(content(0.65))
+            .hover(|s| s.bg(content(0.08)).text_color(content(1.)))
+            .child(icon("globe", 13.).flex_shrink_0())
+            .when(!compact, |d| {
+                d.child(div().flex_1().min_w_0().truncate().child(label))
+                    .child(
+                        icon("chevron-down", 11.)
+                            .flex_shrink_0()
+                            .text_color(content(0.4)),
+                    )
+            })
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_click(cx.listener(|this, event: &gpui::ClickEvent, window, cx| {
+                if this.menu_open(&MenuTarget::HostPicker) {
+                    this.close_menu(cx);
+                } else {
+                    this.open_menu(
+                        MenuTarget::HostPicker,
+                        Anchor::Point(event.position()),
+                        window,
+                        cx,
+                    );
+                }
+            }))
+    }
+    /// The traffic lights, sidebar toggle and visit arrows,
+    /// spanning the open sidebar so the arrows sit at its edge.
     fn navigation(&self, cx: &mut Context<Self>) -> gpui::Div {
         div()
             .w(px(self.navigation_width()))
@@ -5466,11 +5562,16 @@ impl Shell {
             ),
             MenuTarget::Tab(_)
             | MenuTarget::MonoTab(_)
+            | MenuTarget::RemoteMonoTab(_, _)
             | MenuTarget::SearchTab
             | MenuTarget::AppTab(_) => {
                 let tab = match target {
                     MenuTarget::Tab(id) => TitleTab::Session(*id),
                     MenuTarget::MonoTab(id) => self.mono_tab(id.clone()),
+                    MenuTarget::RemoteMonoTab(machine_id, id) => TitleTab::RemoteMono {
+                        machine_id: machine_id.clone(),
+                        id: id.clone(),
+                    },
                     MenuTarget::SearchTab => TitleTab::Search,
                     MenuTarget::AppTab(view) => TitleTab::App(*view),
                     _ => unreachable!(),
@@ -5543,6 +5644,10 @@ impl Shell {
                                 .and_then(|m| m.read(cx).roster.get(id))
                                 .map(|m| m.label())
                                 .unwrap_or_default(),
+                            TitleTab::RemoteMono { id, .. } => self
+                                .remote_workspace_entry("monos", id)
+                                .and_then(|(_, entry)| entry["name"].as_str().map(str::to_owned))
+                                .unwrap_or_else(|| "Remote Mono".into()),
                         }
                     )
                     .into(),
@@ -5609,6 +5714,51 @@ impl Shell {
                 230.,
                 MenuStyle::Explorer,
             ),
+            MenuTarget::HostPicker => {
+                let machines = self.remote.list().unwrap_or_default();
+                let local_label = if cfg!(target_os = "macos") {
+                    "This Mac"
+                } else {
+                    "This computer"
+                };
+                let mut items = vec![
+                    MenuAction::new("host:local", local_label)
+                        .icon("desktop")
+                        .checked(self.remote_workspaces.selected.is_none())
+                        .into(),
+                ];
+                items.extend(machines.iter().map(|machine| {
+                    let replica = self.remote_workspaces.replicas.get(&machine.id);
+                    let status = replica
+                        .map(|replica| {
+                            if replica.offline {
+                                "Offline — showing the last known workspace".to_string()
+                            } else if replica.readiness == "ready" {
+                                "Workspace ready".to_string()
+                            } else if replica.detail.is_empty() {
+                                format!("Workspace {}", replica.readiness)
+                            } else {
+                                replica.detail.clone()
+                            }
+                        })
+                        .unwrap_or_else(|| "Not synced yet".into());
+                    MenuAction::new(format!("host:{}", machine.id), machine.name.clone())
+                        .icon("globe")
+                        .description(status)
+                        .checked(self.remote_workspaces.selected.as_deref() == Some(&machine.id))
+                        .into()
+                }));
+                items.extend([
+                    MenuItem::Separator,
+                    MenuAction::new("add-ssh-host", "Add SSH host…")
+                        .icon("plus")
+                        .into(),
+                    MenuAction::new("manage-connections", "Manage connections…")
+                        .icon("settings")
+                        .into(),
+                ]);
+                ("Choose host".into(), items, 280., MenuStyle::Switcher)
+            }
             MenuTarget::CompactProjectPicker => {
                 let (monos, active) = self
                     .monos
@@ -5901,6 +6051,9 @@ impl Shell {
             MenuTarget::MonoTab(id) => {
                 self.run_title_tab_menu(self.mono_tab(id), action, window, cx)
             }
+            MenuTarget::RemoteMonoTab(machine_id, id) => {
+                self.run_title_tab_menu(TitleTab::RemoteMono { machine_id, id }, action, window, cx)
+            }
             MenuTarget::SearchTab => self.run_title_tab_menu(TitleTab::Search, action, window, cx),
             MenuTarget::AppTab(view) => {
                 self.run_title_tab_menu(TitleTab::App(view), action, window, cx)
@@ -5913,6 +6066,17 @@ impl Shell {
                 _ => {}
             },
             MenuTarget::CompactProjectPicker => {}
+            MenuTarget::HostPicker => match action {
+                "host:local" => self.select_workspace_scope(None, cx),
+                "add-ssh-host" | "manage-connections" => {
+                    self.open_settings(crate::settings::Section::Connections, window, cx)
+                }
+                action if action.starts_with("host:") => self.select_workspace_scope(
+                    Some(action.trim_start_matches("host:").to_string()),
+                    cx,
+                ),
+                _ => {}
+            },
             MenuTarget::ProjectRailGroup(id) => {
                 if action == "delete-project-group" {
                     self.workspace.project_rail_groups.retain(|g| g.id != id);
@@ -6744,15 +6908,42 @@ impl Shell {
         self.projects_frame.update(cx, |_, cx| cx.notify());
         cx.notify();
     }
-    /// `Project: Previous/Next` along the project rail.
+    /// `Project: Previous/Next` along the same scoped order shown in the
+    /// project rail. Remote catalog entries follow the normal remote
+    /// registration path instead of being interpreted as local paths.
     fn step_project(&mut self, step: isize, window: &mut Window, cx: &mut Context<Self>) {
         if self.menu.is_some() {
             return;
         }
-        let projects = self.workspace.visible_project_order();
-        if let Some(next) = adjacent(&projects, Some(&self.workspace.project), step)
-            && next != self.workspace.project
-        {
+        let projects = if self.workspace.classic_layout && self.remote_workspaces.selected.is_none() {
+            self.workspace
+                .visible_project_order()
+                .into_iter()
+                .filter(|path| !path.starts_with("remote://"))
+                .collect()
+        } else {
+            self.project_space_order()
+        };
+        if projects.is_empty() {
+            return;
+        }
+        let len = projects.len() as isize;
+        let ix = projects
+            .iter()
+            .position(|path| self.project_space_active(path))
+            .map(|ix| ix as isize)
+            .map_or(if step < 0 { len - 1 } else { 0 }, |ix| {
+                (ix + step.signum()).rem_euclid(len)
+            }) as usize;
+        let next = projects[ix].clone();
+        if self.project_space_active(&next) {
+            return;
+        }
+        if self.remote_workspaces.selected.is_some() {
+            if let Some((machine_id, entry)) = self.remote_project_entry_by_path(&next) {
+                self.open_remote_workspace_project(machine_id, entry, cx);
+            }
+        } else {
             self.select_project(next, window, cx);
         }
     }
@@ -6970,7 +7161,16 @@ impl Shell {
                 ),
             )
             .when(!self.workspace.classic_layout, |d| {
-                d.child(self.project_spaces(cx))
+                d.child(self.project_spaces(cx)).child(
+                    div()
+                        .h(px(31.))
+                        .flex_shrink_0()
+                        .border_t_1()
+                        .border_color(content(0.08))
+                        .px_2()
+                        .py(px(2.))
+                        .child(self.host_scope_button(false, cx)),
+                )
             })
             .when_some(self.session_preview.as_ref(), |d, preview| {
                 let id = preview.id;
@@ -7020,15 +7220,61 @@ impl Shell {
             .into_any()
     }
 
+    fn project_space_paths(&self) -> Vec<String> {
+        if let Some((machine_id, replica)) = self.selected_workspace_replica() {
+            if replica.usable() {
+                return self
+                    .remote_workspace_project_entries(machine_id)
+                    .iter()
+                    .filter_map(|entry| entry["path"].as_str().map(str::to_owned))
+                    .collect();
+            }
+            return Vec::new();
+        }
+        self.workspace
+            .projects
+            .iter()
+            .filter(|path| !path.starts_with("remote://"))
+            .cloned()
+            .collect()
+    }
+
+    fn project_space_order(&self) -> Vec<String> {
+        let paths = self.project_space_paths();
+        if self.remote_workspaces.selected.is_some() {
+            paths
+        } else {
+            self.space_reorder.order(&paths)
+        }
+    }
+
+    fn remote_project_entry_by_path(&self, path: &str) -> Option<(String, serde_json::Value)> {
+        let machine_id = self.remote_workspaces.selected.clone()?;
+        let entry = self
+            .remote_workspace_project_entries(&machine_id)
+            .into_iter()
+            .find(|entry| entry["path"].as_str() == Some(path))?;
+        Some((machine_id, entry))
+    }
+
+    fn project_space_active(&self, path: &str) -> bool {
+        if let Some((_, replica)) = self.selected_workspace_replica() {
+            let prefix = format!("remote://{}", replica.environment_id);
+            return self.workspace.project.strip_prefix(&prefix) == Some(path);
+        }
+        self.workspace.project == path
+    }
+
     fn project_spaces(&mut self, cx: &mut Context<Self>) -> AnyElement {
         // Sidebar.tsx's ProjectSpacesBar: five equal spaces, paged by chevrons.
-        let shown = self.workspace.projects.len().min(5);
-        let last = self.workspace.projects.len().saturating_sub(shown);
+        let remote_scope = self.remote_workspaces.selected.is_some();
+        let paths = self.project_space_paths();
+        let shown = paths.len().min(5);
+        let last = paths.len().saturating_sub(shown);
         self.spaces_start = self.spaces_start.min(last);
         let first = self.spaces_start;
-        let projects: Vec<_> = self
-            .space_reorder
-            .order(&self.workspace.projects)
+        let ordered = self.project_space_order();
+        let projects: Vec<_> = ordered
             .into_iter()
             .enumerate()
             .skip(first)
@@ -7124,7 +7370,7 @@ impl Shell {
                     .gap_1()
                     .child(self.space_reorder.strip.probe())
                     .children(projects.into_iter().map(|(ix, path)| {
-                        let active = path == self.workspace.project;
+                        let active = self.project_space_active(&path);
                         let hovered = self.hovered_space.as_ref() == Some(&path);
                         let dragging = self.space_reorder.dragging(&path);
                         let offset = self.space_reorder.offset(&path, ix, first);
@@ -7168,12 +7414,17 @@ impl Shell {
                             .on_mouse_down(MouseButton::Left, {
                                 let path = path.clone();
                                 cx.listener(move |this, event: &MouseDownEvent, _, _| {
-                                    this.start_space_drag(&path, event);
+                                    if !remote_scope {
+                                        this.start_space_drag(&path, event);
+                                    }
                                 })
                             })
                             .on_mouse_down(MouseButton::Right, {
                                 let path = path.clone();
                                 cx.listener(move |this, event: &MouseDownEvent, window, cx| {
+                                    if remote_scope {
+                                        return;
+                                    }
                                     let anchor = Anchor::Point(event.position);
                                     // Spaces have no pins or groups to offer.
                                     let target = MenuTarget::Project {
@@ -7189,7 +7440,15 @@ impl Shell {
                                 }
                                 // The tip steps aside once a space is clicked.
                                 this.hovered_space = None;
-                                this.select_project(path.clone(), window, cx)
+                                if remote_scope {
+                                    if let Some((machine_id, entry)) =
+                                        this.remote_project_entry_by_path(&path)
+                                    {
+                                        this.open_remote_workspace_project(machine_id, entry, cx);
+                                    }
+                                } else {
+                                    this.select_project(path.clone(), window, cx)
+                                }
                             }))
                     })),
             )
@@ -7722,7 +7981,7 @@ impl Shell {
         let source = match &id {
             TitleTab::Session(tab) => Some(DragSource::Tab(*tab)),
             TitleTab::Mono { .. } => Some(DragSource::MonoTab),
-            TitleTab::Search | TitleTab::App(_) => None,
+            TitleTab::RemoteMono { .. } | TitleTab::Search | TitleTab::App(_) => None,
         };
         let was = self.pane_drag.is_some();
         self.pane_drag = source.filter(|_| armed).map(|source| PaneDrag {
@@ -8285,6 +8544,16 @@ impl Shell {
                 }
                 TitleTab::Search => {
                     let element = self.search_title_tab(tab_width(tab), cx).left(shifts[ix]);
+                    Some(if dragged.as_ref() == Some(tab) {
+                        gpui::deferred(element).with_priority(1).into_any_element()
+                    } else {
+                        element.into_any_element()
+                    })
+                }
+                TitleTab::RemoteMono { machine_id, id } => {
+                    let element = self
+                        .remote_mono_title_tab(machine_id, id, tab_width(tab), cx)
+                        .left(shifts[ix]);
                     Some(if dragged.as_ref() == Some(tab) {
                         gpui::deferred(element).with_priority(1).into_any_element()
                     } else {
@@ -8956,7 +9225,8 @@ impl Render for Shell {
                     if this.workspace.classic_layout {
                         this.close_app_view(window, cx);
                     } else {
-                        this.close_title_tabs(&[TitleTab::App(view)], None, window, cx);
+                        let tab = this.active_title_tab(cx).unwrap_or(TitleTab::App(view));
+                        this.close_title_tabs(&[tab], None, window, cx);
                     }
                     return;
                 }
@@ -9339,6 +9609,14 @@ mod tests {
     use super::*;
     use gpui::{EntityInputHandler, TestAppContext, WindowHandle};
     use monocode_core::store::Store;
+
+    pub(super) fn modifier() -> &'static str {
+        if cfg!(target_os = "macos") {
+            "cmd"
+        } else {
+            "ctrl"
+        }
+    }
     #[gpui::test]
     fn window_state_is_saved_on_resize_and_restored_with_the_workspace(cx: &mut TestAppContext) {
         let (window, _, _) = window(cx);
@@ -12518,7 +12796,7 @@ mod tests {
             cx.debug_bounds(count_selector).is_none(),
             "a single pane has no count badge"
         );
-        cx.simulate_keystrokes("cmd-d");
+        cx.simulate_keystrokes(&format!("{}-d", modifier()));
         cx.run_until_parked();
         let new = window
             .update(cx, |shell, _, _| {
@@ -12718,7 +12996,7 @@ mod tests {
             .unwrap();
 
         // ⌘W closes the focused pane only; its neighbour takes focus.
-        cx.simulate_keystrokes("cmd-w");
+        cx.simulate_keystrokes(&format!("{}-w", modifier()));
         cx.run_until_parked();
         window
             .update(cx, |shell, _, _| {
@@ -12817,7 +13095,7 @@ mod tests {
             .unwrap();
         let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
-        cx.simulate_keystrokes("cmd-d");
+        cx.simulate_keystrokes(&format!("{}-d", modifier()));
         cx.run_until_parked();
         cx.update(|_, cx| cx.set_reduce_motion(false));
         let new = window
@@ -12989,7 +13267,7 @@ mod tests {
                 assert_eq!(shell.viewport_width, 1000.);
             })
             .unwrap();
-        cx.simulate_keystrokes("cmd-d");
+        cx.simulate_keystrokes(&format!("{}-d", modifier()));
         cx.run_until_parked();
         let new = window
             .update(cx, |shell, _, cx| {
@@ -13007,10 +13285,10 @@ mod tests {
             .update(cx, |shell, _, _| assert!(shell.workspace.sidebar_visible))
             .unwrap();
         // A sidebar the user hid stays hidden when room comes back.
-        cx.simulate_keystrokes("cmd-d");
+        cx.simulate_keystrokes(&format!("{}-d", modifier()));
         cx.run_until_parked();
         // Collapsed for the split; shown, then hidden again by hand.
-        cx.simulate_keystrokes("cmd-b cmd-b");
+        cx.simulate_keystrokes(&format!("{0}-b {0}-b", modifier()));
         cx.run_until_parked();
         window
             .update(cx, |shell, w, cx| {
@@ -13044,8 +13322,11 @@ mod tests {
             .unwrap();
         let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
-        for keys in ["cmd-d", "cmd-shift-d"] {
-            cx.simulate_keystrokes(keys);
+        for keys in [
+            format!("{}-d", modifier()),
+            format!("{}-shift-d", modifier()),
+        ] {
+            cx.simulate_keystrokes(&keys);
             cx.run_until_parked();
             window
                 .update(cx, |shell, _, cx| {
@@ -13080,7 +13361,7 @@ mod tests {
         let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
         // Wide enough for two panes beside the sidebar.
-        cx.simulate_keystrokes("cmd-d");
+        cx.simulate_keystrokes(&format!("{}-d", modifier()));
         cx.run_until_parked();
         window
             .update(cx, |shell, _, _| assert!(shell.workspace.sidebar_visible))
@@ -13100,13 +13381,13 @@ mod tests {
         // Shown by hand while crowded, it stays until the room changes again.
         cx.simulate_resize(gpui::size(px(1000.), px(800.)));
         cx.run_until_parked();
-        cx.simulate_keystrokes("cmd-b");
+        cx.simulate_keystrokes(&format!("{}-b", modifier()));
         cx.run_until_parked();
         window
             .update(cx, |shell, _, _| assert!(shell.workspace.sidebar_visible))
             .unwrap();
         // Hidden by hand, it stays hidden however wide the window grows.
-        cx.simulate_keystrokes("cmd-b");
+        cx.simulate_keystrokes(&format!("{}-b", modifier()));
         cx.simulate_resize(gpui::size(px(1600.), px(800.)));
         cx.run_until_parked();
         window
@@ -13179,7 +13460,7 @@ mod tests {
         let cx = &mut gpui::VisualTestContext::from_window(window.into(), cx);
         cx.run_until_parked();
         assert!(cx.debug_bounds("terminal-dock").is_none());
-        cx.simulate_keystrokes("cmd-j");
+        cx.simulate_keystrokes(&format!("{}-j", modifier()));
         cx.run_until_parked();
         let project = window
             .update(cx, |shell, w, cx| {
@@ -13197,7 +13478,7 @@ mod tests {
         assert!((dock.size.height - px(220.)).abs() < px(2.));
         // ⌘T in the dock opens another terminal, not a session tab.
         let tabs = window.update(cx, |s, _, _| s.workspace.tabs.len()).unwrap();
-        cx.simulate_keystrokes("cmd-t");
+        cx.simulate_keystrokes(&format!("{}-t", modifier()));
         cx.run_until_parked();
         window
             .update(cx, |shell, w, cx| {
@@ -13209,7 +13490,7 @@ mod tests {
             .unwrap();
         assert!(cx.debug_bounds("terminal-tab-1").is_some());
         // ⌘W closes the focused terminal; the session tab stays.
-        cx.simulate_keystrokes("cmd-w");
+        cx.simulate_keystrokes(&format!("{}-w", modifier()));
         cx.run_until_parked();
         window
             .update(cx, |shell, _, _| {
@@ -13235,7 +13516,7 @@ mod tests {
         window
             .update(cx, |shell, w, cx| shell.focus_terminal(w, cx))
             .unwrap();
-        cx.simulate_keystrokes("cmd-j");
+        cx.simulate_keystrokes(&format!("{}-j", modifier()));
         cx.run_until_parked();
         window
             .update(cx, |shell, w, cx| {

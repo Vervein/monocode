@@ -17,6 +17,9 @@ enum Row {
         first: bool,
     },
     Session(i64),
+    /// A Mono in the selected remote workspace. The string is the owner
+    /// catalog's Mono id; opening it must stay on the remote command surface.
+    RemoteMono(String),
     GroupedSession {
         id: i64,
         first: bool,
@@ -31,6 +34,8 @@ enum Row {
     ClassicFolderNew(String),
     ClassicGap(usize),
     Empty,
+    RemoteEmpty,
+    RemoteProjectSelection,
 }
 
 pub(super) struct SidebarList {
@@ -241,26 +246,39 @@ impl Shell {
             {
                 self.sidebar_list.structural_rebuilds += 1;
             }
-            let ids = self.sidebar_session_ids(cx);
-            self.sync_rails(&ids, cx);
-            let entries = self.session_entries(&ids, cx);
-            let listed: HashSet<_> = ids.iter().copied().collect();
-            self.session_row_bounds.retain(|id, _| listed.contains(id));
-            for id in ids {
-                self.session_row_bounds.entry(id).or_default();
+            let remote_project_sessions = self.workspace.classic_layout
+                && self.remote_workspaces.selected.is_some()
+                && self.active_project_in_selected_workspace();
+            if self.remote_workspaces.selected.is_some() && !remote_project_sessions {
+                // A remote host scope is not a filtered view of local sessions:
+                // Focused rows come from the owner catalog and open through workspace
+                // commands. Classic, however, is project-scoped; it only uses the
+                // ordinary session list when the active project belongs to this host.
+                self.session_row_bounds.clear();
+                self.folder_bounds.clear();
+                self.prepare_remote_sidebar_list();
+            } else {
+                let ids = self.sidebar_session_ids(cx);
+                self.sync_rails(&ids, cx);
+                let entries = self.session_entries(&ids, cx);
+                let listed: HashSet<_> = ids.iter().copied().collect();
+                self.session_row_bounds.retain(|id, _| listed.contains(id));
+                for id in ids {
+                    self.session_row_bounds.entry(id).or_default();
+                }
+                let folders: HashSet<_> = entries
+                    .iter()
+                    .filter_map(|entry| match entry {
+                        Entry::Folder { id, .. } => Some(id.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                self.folder_bounds.retain(|id, _| folders.contains(id));
+                for id in folders {
+                    self.folder_bounds.entry(id).or_default();
+                }
+                self.prepare_sidebar_list(&entries, cx);
             }
-            let folders: HashSet<_> = entries
-                .iter()
-                .filter_map(|entry| match entry {
-                    Entry::Folder { id, .. } => Some(id.clone()),
-                    _ => None,
-                })
-                .collect();
-            self.folder_bounds.retain(|id, _| folders.contains(id));
-            for id in folders {
-                self.folder_bounds.entry(id).or_default();
-            }
-            self.prepare_sidebar_list(&entries, cx);
         }
         self.sync_sidebar_list_visibility();
         self.sidebar_list.clear_bounds();
@@ -268,15 +286,86 @@ impl Shell {
 
     fn sidebar_scope(&self) -> String {
         format!(
-            "{}\0{}\0{}\0{:?}\0{}\0{}\0{}",
+            "{}\0{}\0{}\0{:?}\0{}\0{}\0{}\0{}",
             self.workspace.project,
             self.working_copy(),
             self.query,
             self.workspace.session_filters,
             self.workspace.preferences.show_archived,
             self.workspace.boxy_layout(),
-            self.workspace.classic_layout
+            self.workspace.classic_layout,
+            self.remote_workspaces
+                .selected
+                .as_deref()
+                .unwrap_or("local")
         )
+    }
+
+    fn active_project_in_selected_workspace(&self) -> bool {
+        let Some((_, replica)) = self.selected_workspace_replica() else {
+            return false;
+        };
+        let prefix = format!("remote://{}/", replica.environment_id);
+        self.workspace.project.starts_with(&prefix)
+    }
+
+    /// Remote navigation outside an active host project. Focused shows catalog
+    /// Monos; Classic remains project-scoped and asks for a host project instead
+    /// of borrowing local rows or flattening host-wide Monos into Sessions.
+    fn prepare_remote_sidebar_list(&mut self) {
+        if self.workspace.classic_layout {
+            self.sidebar_list.update(
+                self.sidebar_scope(),
+                vec![
+                    Row::Navigation,
+                    Row::Heading {
+                        label: "Sessions",
+                        first: true,
+                    },
+                    Row::RemoteProjectSelection,
+                ],
+            );
+            return;
+        }
+        let catalog = self
+            .selected_workspace_replica()
+            .filter(|(_, replica)| replica.usable())
+            .and_then(|(machine_id, _)| self.remote_workspace_catalog(machine_id));
+        let query = self.query.trim().to_lowercase();
+        let mut monos = Vec::new();
+        if let Some(catalog) = catalog {
+            for entry in catalog["monos"].as_array().into_iter().flatten() {
+                let Some(id) = entry["id"].as_str().map(str::to_owned) else {
+                    continue;
+                };
+                if !query.is_empty() {
+                    let searchable = format!(
+                        "{}\n{}\n{}",
+                        entry["name"].as_str().unwrap_or_default(),
+                        entry["status"].as_str().unwrap_or_default(),
+                        entry["lastMessage"].as_str().unwrap_or_default(),
+                    )
+                    .to_lowercase();
+                    if !searchable.contains(&query) {
+                        continue;
+                    }
+                }
+                monos.push(Row::RemoteMono(id));
+            }
+        }
+        let empty = monos.is_empty();
+        let mut rows = vec![
+            Row::Navigation,
+            Row::Heading {
+                label: "Monos",
+                first: true,
+            },
+        ];
+        rows.extend(monos);
+        if empty {
+            rows.push(Row::RemoteEmpty);
+        }
+        self.sidebar_list.update(self.sidebar_scope(), rows);
     }
 
     pub(super) fn prepare_sidebar_list(&mut self, entries: &[Entry], cx: &App) {
@@ -507,6 +596,7 @@ impl Shell {
                 .when(first, |d| d.child(self.sidebar_filter_button(cx)))
                 .into_any(),
             Row::Session(id) => self.session_card(id, cx),
+            Row::RemoteMono(id) => return self.remote_workspace_mono_row(id, false, cx),
             Row::GroupedSession { id, first, last } => {
                 return div()
                     .px_2()
@@ -546,6 +636,24 @@ impl Shell {
                 } else {
                     "No matching sessions"
                 })
+                .into_any(),
+            Row::RemoteEmpty => div()
+                .px_2()
+                .py_2()
+                .text_size(px(12.))
+                .text_color(rgb(MUTED))
+                .child(if self.query.is_empty() {
+                    "No remote Monos yet"
+                } else {
+                    "No matching remote Monos"
+                })
+                .into_any(),
+            Row::RemoteProjectSelection => div()
+                .px_2()
+                .py_2()
+                .text_size(px(12.))
+                .text_color(rgb(MUTED))
+                .child("Select a project on this host to see its sessions")
                 .into_any(),
         };
         div()
@@ -715,6 +823,7 @@ impl Shell {
                     ("Inbox", "inbox"),
                     ("Notes", "note"),
                     ("Automations", "zap"),
+                    ("Machines", "globe"),
                 ]
                 .into_iter()
                 .filter(|(label, _)| match *label {
@@ -816,6 +925,7 @@ impl Shell {
                             "Inbox" => this.open_inbox(window, cx),
                             "Notes" => this.open_notes(window, cx),
                             "Automations" => this.open_automations(window, cx),
+                            "Machines" => this.open_machines(window, cx),
                             _ => (),
                         }))
                         .on_hover(cx.listener(move |this, hovered, _, cx| {

@@ -5,6 +5,7 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
+#[allow(dead_code)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Permission {
     Prompt,
@@ -91,6 +92,7 @@ impl Target {
         }
     }
 
+    #[allow(dead_code)]
     pub fn from_tag(tag: &str) -> Option<Self> {
         if let Some(rest) = tag.strip_prefix("monocode-session:") {
             let (id, sequence) = rest.split_once(':')?;

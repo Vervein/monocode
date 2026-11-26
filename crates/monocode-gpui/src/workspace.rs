@@ -11,6 +11,7 @@ pub(crate) enum AppView {
     Inbox,
     Notes,
     Automations,
+    Machines,
 }
 impl AppView {
     pub fn label(self) -> &'static str {
@@ -18,6 +19,7 @@ impl AppView {
             Self::Inbox => "Inbox",
             Self::Notes => "Notes",
             Self::Automations => "Automations",
+            Self::Machines => "Machines",
         }
     }
     pub fn icon(self) -> &'static str {
@@ -25,6 +27,7 @@ impl AppView {
             Self::Inbox => "inbox",
             Self::Notes => "note",
             Self::Automations => "zap",
+            Self::Machines => "globe",
         }
     }
 }
@@ -40,13 +43,19 @@ pub(crate) enum TitleTab {
         project: String,
         worktree: String,
     },
+    /// A Mono in a remote workspace. It is host-scoped, never a local pane or
+    /// scheduler object; `machine_id` keeps tabs from different machines apart.
+    RemoteMono {
+        machine_id: String,
+        id: String,
+    },
 }
 
 impl TitleTab {
     pub fn session(&self) -> Option<i64> {
         match self {
             Self::Session(id) => Some(*id),
-            Self::Mono { .. } | Self::Search | Self::App(_) => None,
+            Self::Mono { .. } | Self::RemoteMono { .. } | Self::Search | Self::App(_) => None,
         }
     }
 }
@@ -636,12 +645,20 @@ impl Workspace {
     /// pinned projects, then each group's members, then the rest.
     pub fn visible_project_order(&self) -> Vec<String> {
         if !self.classic_layout {
-            return self.projects.clone();
+            return self
+                .projects
+                .iter()
+                .filter(|path| !path.starts_with("remote://"))
+                .cloned()
+                .collect();
         }
-        let unpinned = |p: &&String| !self.project_rail_pinned.contains(*p);
+        let unpinned = |p: &&String| {
+            !p.starts_with("remote://") && !self.project_rail_pinned.contains(*p)
+        };
         let mut order: Vec<String> = self
             .projects
             .iter()
+            .filter(|path| !path.starts_with("remote://"))
             .filter(|p| self.project_rail_pinned.contains(*p))
             .cloned()
             .collect();

@@ -14,6 +14,7 @@ impl Shell {
             AppView::Inbox => "Inbox",
             AppView::Notes => "Notes",
             AppView::Automations => "Automations",
+            AppView::Machines => "Machines",
         })
     }
 
@@ -129,6 +130,161 @@ impl Shell {
                 this.open_title_tab(&TitleTab::App(view), window, cx);
             }))
     }
+    /// A remote Mono as a first-class Focused title tab. The rendered surface
+    /// still belongs to Machines, but the tab identity is the remote object so
+    /// it never masquerades as a local Mono or session.
+    pub(super) fn remote_mono_title_tab(
+        &self,
+        machine_id: &str,
+        id: &str,
+        width: f32,
+        cx: &mut Context<Self>,
+    ) -> gpui::Stateful<gpui::Div> {
+        let tab = TitleTab::RemoteMono {
+            machine_id: machine_id.to_string(),
+            id: id.to_string(),
+        };
+        let active = self.active_title_tab(cx) == Some(tab.clone());
+        let close = active || width >= TAB_CLOSE_MIN_WIDTH;
+        let entry = self
+            .remote_workspace_entry("monos", id)
+            .map(|(_, entry)| entry);
+        let name = entry
+            .as_ref()
+            .and_then(|entry| entry["name"].as_str())
+            .unwrap_or("Remote Mono")
+            .to_string();
+        let status = entry
+            .as_ref()
+            .and_then(|entry| entry["status"].as_str())
+            .unwrap_or("idle")
+            .to_string();
+        let color = entry
+            .as_ref()
+            .and_then(|entry| entry["color"].as_str())
+            .and_then(|color| u32::from_str_radix(color.trim_start_matches('#'), 16).ok())
+            .unwrap_or(0x888888);
+        let mascot = entry
+            .as_ref()
+            .and_then(|entry| entry["mascot"].as_str())
+            .unwrap_or("mono")
+            .to_string();
+        let element_id = format!("remote-mono-tab-{machine_id}-{id}");
+        let close_id = format!("close-remote-mono-tab-{machine_id}-{id}");
+        let label = format!("{name}, {status}");
+        div()
+            .id(SharedString::from(element_id.clone()))
+            .debug_selector(move || element_id.clone())
+            .group("remote-mono-title-tab")
+            .role(Role::Tab)
+            .aria_label(label)
+            .aria_selected(active)
+            .cursor_pointer()
+            .w(px(width))
+            .h(px(TITLE_BAR_HEIGHT))
+            .flex_shrink_0()
+            .flex()
+            .items_center()
+            .relative()
+            .child(
+                title_tab_plate(active, false)
+                    .text_color(content(if active { 1. } else { 0.5 }))
+                    .w_full()
+                    .min_w_0()
+                    .when(close && width >= TAB_CLOSE_MIN_WIDTH, |d| d.pr_7())
+                    .when(width < NARROW_TAB, |d| {
+                        d.px(px(((width - TAB_TILE.w) / 2.).max(0.)))
+                    })
+                    .gap(px(TAB_TILE_GAP))
+                    .group_hover("remote-mono-title-tab", |s| {
+                        s.text_color(content(1.)).bg(title_tab_fill(active, true))
+                    })
+                    .child(mark_tile(
+                        &TAB_TILE,
+                        Face::Neutral,
+                        crate::monos::avatar::avatar(&mascot, color, &status, 14., true),
+                    ))
+                    .child(
+                        div()
+                            .min_w_0()
+                            .flex_1()
+                            .truncate()
+                            .text_size(px(TITLE_TAB_TEXT_SIZE))
+                            .child(name.clone()),
+                    ),
+            )
+            .when(close, |d| {
+                let close_tab = tab.clone();
+                d.child(
+                    div()
+                        .id(SharedString::from(close_id.clone()))
+                        .debug_selector(move || close_id.clone())
+                        .role(Role::Button)
+                        .aria_label(format!("Close {name}"))
+                        .absolute()
+                        .right_1()
+                        .top(px(10.))
+                        .size(px(20.))
+                        .rounded_sm()
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .opacity(0.)
+                        .group_hover("remote-mono-title-tab", |s| s.opacity(1.))
+                        .hover(|s| s.bg(content(0.1)))
+                        .child(icon("close", 12.))
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(move |this, _, window, cx| {
+                            cx.stop_propagation();
+                            this.close_title_tabs(
+                                std::slice::from_ref(&close_tab),
+                                None,
+                                window,
+                                cx,
+                            );
+                        })),
+                )
+            })
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener({
+                    let tab = tab.clone();
+                    move |this, event, _, cx| this.start_tab_drag(tab.clone(), event, cx)
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener({
+                    let machine_id = machine_id.to_string();
+                    let id = id.to_string();
+                    move |this, event: &MouseDownEvent, window, cx| {
+                        this.open_menu(
+                            MenuTarget::RemoteMonoTab(machine_id.clone(), id.clone()),
+                            Anchor::Point(event.position),
+                            window,
+                            cx,
+                        )
+                    }
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener({
+                    let tab = tab.clone();
+                    move |this, _, window, cx| {
+                        cx.stop_propagation();
+                        this.close_title_tabs(std::slice::from_ref(&tab), None, window, cx);
+                    }
+                }),
+            )
+            .on_click(cx.listener(move |this, _, window, cx| {
+                if std::mem::take(&mut this.skip_tab_click) {
+                    return;
+                }
+                this.open_title_tab(&tab, window, cx);
+            }))
+    }
+
     /// Reads how many notes the store holds for the sidebar's Notes row.
     pub(super) fn load_note_count(&mut self, cx: &mut Context<Self>) {
         let store = self.store.clone();
@@ -220,7 +376,33 @@ impl Shell {
             AppView::Notes => self.notes.clone().map(IntoElement::into_any_element),
             AppView::Inbox => self.inbox.clone().map(IntoElement::into_any_element),
             AppView::Automations => self.automations.clone().map(IntoElement::into_any_element),
+            AppView::Machines => self.machines.clone().map(IntoElement::into_any_element),
         }
+    }
+
+    pub(super) fn open_machines(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.prepare_app_view(window, cx);
+        if self.machines.is_none() {
+            let view = cx.new(|cx| crate::workspaces::Workspaces::new(self.remote.clone(), cx));
+            self.app_view_events.push(cx.subscribe_in(
+                &view,
+                window,
+                |this, _, event: &crate::workspaces::Event, window, cx| match event {
+                    crate::workspaces::Event::Close => this.close_app_view(window, cx),
+                },
+            ));
+            self.machines = Some(view);
+        }
+        if let Some(view) = &self.machines {
+            view.update(cx, |view, cx| {
+                view.reload_machines(cx);
+                // The catalog tab and each remote-Mono detail tab are separate
+                // destinations even though one view implements both surfaces.
+                // Activating the catalog must not close a detail tab's state.
+                view.show_catalog(cx);
+            });
+        }
+        self.show_app_view(AppView::Machines, window, cx);
     }
 
     pub(super) fn focus_app_view(&self, window: &mut Window, cx: &mut Context<Self>) -> bool {
@@ -230,6 +412,7 @@ impl Shell {
             Some(AppView::Automations) => {
                 self.automations.as_ref().map(|view| view.focus_handle(cx))
             }
+            Some(AppView::Machines) => self.machines.as_ref().map(|view| view.focus_handle(cx)),
             None => return false,
         };
         if let Some(focus) = focus {

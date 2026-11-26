@@ -5,7 +5,7 @@ use crate::{
     right_panel::{DIFF_ADD, DIFF_DEL, format_integer, tabular},
     workspace,
 };
-use gpui::{ListAlignment, ListState, list};
+use gpui::{ListAlignment, ListState, hsla, list};
 use monocode_core::scm::DiffStats;
 
 const ICON_RAIL_WIDTH: f32 = 48.;
@@ -16,6 +16,9 @@ enum ProjectRailRow {
     Heading(&'static str),
     Group(String),
     Project { path: String, grouped: bool },
+    RemoteStatus,
+    RemoteMono(String),
+    RemoteProject(serde_json::Value),
     Gap,
     Empty,
 }
@@ -332,10 +335,50 @@ impl Shell {
     }
     fn prepare_project_rail(&mut self, compact: bool) {
         let mut rows = Vec::new();
+        if let Some(machine_id) = self.remote_workspaces.selected.clone() {
+            rows.push(ProjectRailRow::RemoteStatus);
+            let catalog = self
+                .remote_workspaces
+                .replicas
+                .get(&machine_id)
+                .filter(|replica| replica.usable())
+                .and_then(|replica| replica.catalog.as_ref());
+            if let Some(catalog) = catalog {
+                let monos: Vec<String> = catalog["monos"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|entry| entry["id"].as_str().map(str::to_owned))
+                    .collect();
+                if self.workspace.preferences.monos {
+                    rows.extend(monos.into_iter().map(ProjectRailRow::RemoteMono));
+                }
+                rows.push(ProjectRailRow::Heading("Projects"));
+                let mut count = 0;
+                for entry in self.remote_workspace_project_entries(&machine_id) {
+                    count += 1;
+                    rows.push(ProjectRailRow::RemoteProject(entry));
+                }
+                if count == 0 {
+                    rows.push(ProjectRailRow::Empty);
+                }
+            } else {
+                rows.push(ProjectRailRow::Empty);
+            }
+            rows.push(ProjectRailRow::Gap);
+            self.project_rail_list.update(rows, compact);
+            return;
+        }
         if self.workspace.preferences.monos {
             rows.push(ProjectRailRow::Monos);
         }
-        let projects = &self.workspace.projects;
+        let projects: Vec<_> = self
+            .workspace
+            .projects
+            .iter()
+            .filter(|path| !path.starts_with("remote://"))
+            .cloned()
+            .collect();
         let pinned: Vec<_> = projects
             .iter()
             .filter(|p| self.workspace.project_rail_pinned.contains(*p))
@@ -378,7 +421,7 @@ impl Shell {
         }
         rows.push(ProjectRailRow::Heading("Projects"));
         let mut count = 0;
-        for path in projects {
+        for path in &projects {
             let grouped = self
                 .workspace
                 .project_rail_assignments
@@ -426,6 +469,11 @@ impl Shell {
             ProjectRailRow::Project { path, grouped } => {
                 self.project_rail_row(ix, path, compact, grouped, row_gap, cx)
             }
+            ProjectRailRow::RemoteStatus => self.remote_workspace_status_row(compact, cx),
+            ProjectRailRow::RemoteMono(id) => self.remote_workspace_mono_row(id, compact, cx),
+            ProjectRailRow::RemoteProject(entry) => {
+                self.remote_workspace_project_row(entry, compact, cx)
+            }
             ProjectRailRow::Group(id) => self.project_rail_group_header(id, cx),
             ProjectRailRow::Gap => div().h(px(8.)).into_any(),
             ProjectRailRow::Empty => div()
@@ -438,6 +486,231 @@ impl Shell {
                 .into_any(),
         }
     }
+    pub(super) fn remote_workspace_entry(
+        &self,
+        kind: &str,
+        id: &str,
+    ) -> Option<(String, serde_json::Value)> {
+        let machine_id = self.remote_workspaces.selected.clone()?;
+        let catalog = self.remote_workspace_catalog(&machine_id)?;
+        let entry = catalog[kind]
+            .as_array()?
+            .iter()
+            .find(|entry| entry["id"].as_str() == Some(id))?
+            .clone();
+        Some((machine_id, entry))
+    }
+
+    fn remote_workspace_status_row(&self, compact: bool, _cx: &mut Context<Self>) -> AnyElement {
+        let Some((_, replica)) = self.selected_workspace_replica() else {
+            return div().into_any();
+        };
+        let (label, detail) = if replica.offline {
+            (
+                "Offline",
+                if replica.detail.is_empty() {
+                    "Showing the last known workspace".to_string()
+                } else {
+                    replica.detail.clone()
+                },
+            )
+        } else if replica.readiness == "ready" {
+            ("Workspace ready", String::new())
+        } else {
+            (
+                match replica.readiness.as_str() {
+                    "unbound" => "Workspace unbound",
+                    "owner_unavailable" => "Owner unavailable",
+                    _ => "Workspace syncing",
+                },
+                replica.detail.clone(),
+            )
+        };
+        div()
+            .w_full()
+            .when(compact, |d| d.flex().justify_center().py(px(3.)))
+            .when(!compact, |d| d.ml(px(6.)).mr_2().mb_1())
+            .child(
+                div()
+                    .h(px(if compact { 28. } else { 30. }))
+                    .when(compact, |d| d.w(px(32.)))
+                    .px_2()
+                    .rounded_md()
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(12.))
+                    .text_color(content(if replica.offline { 0.9 } else { 0.45 }))
+                    .child(div().size(px(7.)).rounded_full().bg(if replica.offline {
+                        hsla(0.0, 0.72, 0.56, 1.0)
+                    } else if replica.readiness == "ready" {
+                        accent_color()
+                    } else {
+                        content(0.3)
+                    }))
+                    .when(!compact, |d| {
+                        d.child(div().flex_1().min_w_0().truncate().child(label))
+                            .when(!detail.is_empty(), |d| {
+                                d.child(
+                                    div()
+                                        .flex_shrink_0()
+                                        .max_w(px(90.))
+                                        .truncate()
+                                        .text_size(px(10.))
+                                        .text_color(content(0.35))
+                                        .child(detail),
+                                )
+                            })
+                    }),
+            )
+            .into_any()
+    }
+
+    pub(super) fn remote_workspace_mono_row(
+        &mut self,
+        id: String,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some((machine_id, entry)) = self.remote_workspace_entry("monos", &id) else {
+            return div().into_any();
+        };
+        let name = entry["name"].as_str().unwrap_or("Mono").to_string();
+        let status = entry["status"].as_str().unwrap_or("idle").to_string();
+        let preview = entry["lastMessage"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        let color = u32::from_str_radix(
+            entry["color"]
+                .as_str()
+                .unwrap_or("#888888")
+                .trim_start_matches('#'),
+            16,
+        )
+        .unwrap_or(0x888888);
+        let label = format!("{name}, {status}");
+        div()
+            .id(SharedString::from(format!("remote-mono-rail-{id}")))
+            .debug_selector(move || format!("remote-mono-rail-{id}"))
+            .role(Role::Button)
+            .aria_label(label)
+            .cursor_pointer()
+            .h(px(32.))
+            .when(!compact, |d| d.ml(px(6.)).mr_2())
+            .when(compact, |d| d.w(px(32.)))
+            .px_2()
+            .rounded_md()
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_size(px(14.))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(content(0.85))
+            .hover(|s| s.bg(content(0.08)))
+            .child(
+                div()
+                    .size(px(16.))
+                    .flex_shrink_0()
+                    .flex()
+                    .items_center()
+                    .justify_center()
+                    .child(crate::monos::avatar::avatar(
+                        entry["mascot"].as_str().unwrap_or("mono"),
+                        color,
+                        &status,
+                        16.,
+                        true,
+                    )),
+            )
+            .when(!compact, |d| {
+                d.child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .flex()
+                        .flex_col()
+                        .child(div().truncate().child(name.clone()))
+                        .when(!preview.is_empty(), |d| {
+                            d.child(
+                                div()
+                                    .truncate()
+                                    .text_size(px(10.))
+                                    .font_weight(FontWeight::NORMAL)
+                                    .text_color(content(0.4))
+                                    .child(preview),
+                            )
+                        }),
+                )
+            })
+            .on_click(cx.listener(move |this, _, window, cx| {
+                this.open_remote_workspace_mono(machine_id.clone(), entry.clone(), window, cx)
+            }))
+            .into_any()
+    }
+
+    fn remote_workspace_project_row(
+        &mut self,
+        entry: serde_json::Value,
+        compact: bool,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let Some(machine_id) = self.remote_workspaces.selected.clone() else {
+            return div().into_any();
+        };
+        let id = entry["id"].as_str().unwrap_or("project").to_string();
+        let path = entry["path"].as_str().unwrap_or_default().to_string();
+        let name = entry["name"]
+            .as_str()
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| path.rsplit('/').next().unwrap_or(&path).to_string());
+        let branch = entry["branch"].as_str().unwrap_or_default().to_string();
+        div()
+            .id(SharedString::from(format!("remote-project-rail-{id}")))
+            .debug_selector(move || format!("remote-project-rail-{id}"))
+            .role(Role::Button)
+            .aria_label(format!("Switch project, {name}"))
+            .aria_description(path.clone())
+            .cursor_pointer()
+            .h(px(32.))
+            .when(!compact, |d| d.ml(px(6.)).mr_2())
+            .when(compact, |d| d.w(px(32.)))
+            .px_2()
+            .rounded_md()
+            .flex()
+            .items_center()
+            .gap_2()
+            .text_size(px(14.))
+            .font_weight(FontWeight::MEDIUM)
+            .text_color(content(0.85))
+            .hover(|s| s.bg(content(0.08)))
+            .child(
+                icon("folder", 15.)
+                    .flex_shrink_0()
+                    .text_color(content(0.45)),
+            )
+            .when(!compact, |d| {
+                d.child(div().flex_1().min_w_0().truncate().child(name.clone()))
+                    .when(!branch.is_empty(), |d| {
+                        d.child(
+                            div()
+                                .flex_shrink_0()
+                                .max_w(px(76.))
+                                .truncate()
+                                .text_size(px(11.))
+                                .font_weight(FontWeight::NORMAL)
+                                .text_color(content(0.42))
+                                .child(branch),
+                        )
+                    })
+            })
+            .on_click(cx.listener(move |this, _, _, cx| {
+                this.open_remote_workspace_project(machine_id.clone(), entry.clone(), cx)
+            }))
+            .into_any()
+    }
+
     fn project_rail_heading(
         &self,
         label: &'static str,
@@ -522,6 +795,7 @@ impl Shell {
                         .map(|prompt| div().mb_1().child(prompt)),
                 )
             })
+            .child(self.host_scope_button(compact, cx))
             .child(
                 div()
                     .id("rail-settings")
@@ -846,6 +1120,7 @@ impl Shell {
                         workspace::AppView::Automations,
                         self.workspace.sidebar_automations_visible,
                     ),
+                    (workspace::AppView::Machines, true),
                 ]
                 .into_iter()
                 .filter(|(_, v)| *v)
@@ -861,6 +1136,7 @@ impl Shell {
                             workspace::AppView::Inbox => "rail-inbox",
                             workspace::AppView::Notes => "rail-notes",
                             workspace::AppView::Automations => "rail-automations",
+                            workspace::AppView::Machines => "rail-machines",
                         },
                         view.label(),
                         glyph,
@@ -887,6 +1163,7 @@ impl Shell {
                                 workspace::AppView::Inbox => this.open_inbox(w, cx),
                                 workspace::AppView::Notes => this.open_notes(w, cx),
                                 workspace::AppView::Automations => this.open_automations(w, cx),
+                                workspace::AppView::Machines => this.open_machines(w, cx),
                             }
                         }
                     }))

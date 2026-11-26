@@ -245,3 +245,107 @@ export function requireHostDescriptor(value: HostDescriptor): HostDescriptor {
   }
   return value;
 }
+
+// MARK: Environment workspace (SSH remote workspace)
+
+/** Workspace half of `environment.describe`: the bound Mono/project data
+ * source behind this host, or why there is none yet. */
+export const WORKSPACE_SCHEMA_VERSION = 1;
+
+export const WORKSPACE_CAPABILITIES = {
+  catalog: "workspace.catalog.v1",
+  changes: "workspace.changes.v1",
+  monoRead: "mono.read.v1",
+  monoSend: "mono.send.v1",
+  monoProjectLinks: "mono.projectLinks.v1",
+  monoFiles: "mono.files.v1",
+  monoApprovals: "mono.approvals.v1",
+  receipts: "workspace.receipts.v1",
+} as const;
+
+export type WorkspaceOwnerMode = "desktop" | "service" | "unbound";
+export type WorkspaceReadiness =
+  | "ready"
+  | "starting"
+  | "owner_unavailable"
+  | "unbound";
+
+export type WorkspaceCandidate = {
+  workspaceSourceId: string;
+  ownerMode: WorkspaceOwnerMode;
+  appVersion?: string;
+  startedAt: number;
+};
+
+export type WorkspaceDescriptor = {
+  workspaceSourceId: string | null;
+  ownerMode: WorkspaceOwnerMode;
+  ownerEpoch: string | null;
+  dataSchemaVersion: number | null;
+  readiness: WorkspaceReadiness;
+  capabilities: string[];
+  candidates?: WorkspaceCandidate[];
+  detail?: string;
+};
+
+/** One catalog page. First-version owners answer a single complete page; the
+ * paging fields exist so real paging can arrive without a protocol break. */
+export type WorkspaceCatalogPage = {
+  sourceId: string;
+  ownerEpoch: string;
+  catalogRevision: number;
+  snapshotId: string;
+  complete: boolean;
+  nextPageToken?: string | null;
+  projects: unknown[];
+  monos: unknown[];
+  sessions: unknown[];
+  externalReferences?: unknown[];
+};
+
+export type WorkspaceChangesAnswer =
+  | { kind: "unchanged"; catalogRevision: number }
+  | { kind: "reset"; catalogRevision: number; ownerEpoch: string };
+
+export type WorkspaceCommandTarget = {
+  kind: string;
+  id: string;
+  backend?: string;
+};
+
+/** The mutation envelope every workspace write travels in. The owner
+ * deduplicates on `commandId` plus the canonical signature of all business
+ * fields; a retry of the same logical command returns the original receipt
+ * and a same-ID different-business command is rejected. */
+export type WorkspaceCommand = {
+  commandId: string;
+  environmentId: string;
+  workspaceSourceId: string;
+  expectedOwnerEpoch?: string;
+  target: WorkspaceCommandTarget;
+  action: string;
+  expectedRevision?: number;
+  runId?: string;
+  payload?: unknown;
+};
+
+export type WorkspaceReceiptStatus =
+  | "accepted"
+  | "completed"
+  | "rejected"
+  | "failed"
+  | "unknown";
+
+export type WorkspaceCommandReceipt = {
+  commandId: string;
+  status: WorkspaceReceiptStatus;
+  result?: unknown;
+  error?: string;
+  ownerEpoch: string;
+  updatedAt: number;
+};
+
+export type WorkspaceReceiptLookup =
+  | { kind: "found"; receipt: WorkspaceCommandReceipt }
+  | { kind: "retentionExpired" }
+  | { kind: "notFound" };

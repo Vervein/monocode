@@ -72,7 +72,7 @@ impl SpaceReorder {
 impl Shell {
     pub(super) fn start_space_drag(&mut self, path: &str, event: &MouseDownEvent) {
         self.space_reorder.skip_click = false;
-        let projects = &self.workspace.projects;
+        let projects = self.project_space_paths();
         let (Some(from), Some(strip)) = (
             projects.iter().position(|p| p == path),
             self.space_reorder.strip.get(),
@@ -171,7 +171,7 @@ impl Shell {
             drag.paging = false;
             return false;
         }
-        let last = self.workspace.projects.len().saturating_sub(5);
+        let last = self.project_space_paths().len().saturating_sub(5);
         let next = self.spaces_start.saturating_add_signed(edge).min(last);
         if next != self.spaces_start {
             self.spaces_start = next;
@@ -183,7 +183,7 @@ impl Shell {
 
     /// Points the drag at the visible slot nearest to the dragged space.
     fn retarget_space_drag(&mut self) {
-        let len = self.workspace.projects.len();
+        let len = self.project_space_paths().len();
         let first = self.spaces_start;
         let Some(drag) = self.space_reorder.drag.as_mut() else {
             return;
@@ -201,7 +201,27 @@ impl Shell {
         if !drag.active {
             return;
         }
-        if self.workspace.move_project(&drag.path, drag.to) {
+        let mut visible = self.project_space_paths();
+        let Some(from) = visible.iter().position(|path| path == &drag.path) else {
+            return;
+        };
+        let moved = visible.remove(from);
+        visible.insert(drag.to.min(visible.len()), moved);
+        let mut visible = visible.into_iter();
+        let projects: Vec<_> = self
+            .workspace
+            .projects
+            .iter()
+            .map(|path| {
+                if path.starts_with("remote://") {
+                    path.clone()
+                } else {
+                    visible.next().unwrap_or_else(|| path.clone())
+                }
+            })
+            .collect();
+        if projects != self.workspace.projects {
+            self.workspace.projects = projects;
             self.persist(cx);
         }
         self.invalidate_chrome(cx);

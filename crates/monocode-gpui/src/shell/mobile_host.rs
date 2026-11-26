@@ -52,27 +52,27 @@ pub(super) struct Mobile {
     push_scheduled: bool,
     publishing: bool,
     /// Persisted session IDs, which stay stable for paired phones.
-    ids: HashMap<i64, String>,
+    pub(super) ids: HashMap<i64, String>,
     /// Sessions whose current turn a phone started: their approvals,
     /// questions and finish are sent to it.
     started: HashSet<i64>,
     /// The last message of each Mono conversation not open here, by its
     /// session, with the update time it was read at: read again only once
     /// the conversation has changed.
-    mono_previews: HashMap<i64, MonoPreview>,
+    pub(super) mono_previews: HashMap<i64, MonoPreview>,
 }
 
 #[derive(Clone)]
-struct MonoPreview {
-    updated_at: u64,
-    text: Value,
+pub(super) struct MonoPreview {
+    pub(super) updated_at: u64,
+    pub(super) text: Value,
 }
 
-struct CatalogEntry {
-    id: i64,
-    project: String,
-    summary: Session,
-    live: Option<mobile_catalog::LiveSession>,
+pub(super) struct CatalogEntry {
+    pub(super) id: i64,
+    pub(super) project: String,
+    pub(super) summary: Session,
+    pub(super) live: Option<mobile_catalog::LiveSession>,
 }
 
 enum Receipt {
@@ -85,39 +85,39 @@ struct GitJob {
 }
 
 #[derive(Clone, PartialEq)]
-enum Target {
+pub(super) enum Target {
     Session(i64),
     Mono(String),
 }
 
 /// A conversation read from disk, reused until the session opens on desktop.
-struct Saved {
-    id: i64,
-    settings: Settings,
-    rows: Vec<Row>,
-    harness: String,
-    cwd: String,
+pub(super) struct Saved {
+    pub(super) id: i64,
+    pub(super) settings: Settings,
+    pub(super) rows: Vec<Row>,
+    pub(super) harness: String,
+    pub(super) cwd: String,
     /// The store cursor for turns above `rows`: a long Mono loads only its
     /// newest page.
-    history: Option<i64>,
+    pub(super) history: Option<i64>,
     /// The Mono's name, so its saved turns are drawn as Mono turns, as they
     /// are once its chat opens, and keep their heights when it does.
-    mono: Option<String>,
+    pub(super) mono: Option<String>,
     /// The cards of the sessions the Mono started, as they stood on reading.
-    launches: HashMap<i64, Value>,
+    pub(super) launches: HashMap<i64, Value>,
 }
 
 /// How an older page's turns are drawn, as the conversation's own are.
-struct PageLook {
-    mono: Option<String>,
-    launches: HashMap<i64, Value>,
-    cwd: String,
-    harness: String,
-    model: Option<String>,
+pub(super) struct PageLook {
+    pub(super) mono: Option<String>,
+    pub(super) launches: HashMap<i64, Value>,
+    pub(super) cwd: String,
+    pub(super) harness: String,
+    pub(super) model: Option<String>,
 }
 
 /// A read's answer, or the store page it still needs.
-enum Read {
+pub(super) enum Read {
     Done(Value),
     /// The turns before the loaded rows, from the page at this cursor.
     Page(i64),
@@ -137,28 +137,28 @@ struct Watch {
 }
 
 /// What a session's turns are built from, live or saved.
-struct Snapshot<'a> {
-    usage_limit: Value,
-    rows: &'a [Row],
-    turns: &'a HashMap<usize, TurnInfo>,
-    cwd: &'a str,
-    harness: &'a str,
-    model: Option<String>,
-    busy: bool,
-    waiting: Option<&'static str>,
-    mono: Option<String>,
-    pending: Vec<turns::Pending>,
+pub(super) struct Snapshot<'a> {
+    pub(super) usage_limit: Value,
+    pub(super) rows: &'a [Row],
+    pub(super) turns: &'a HashMap<usize, TurnInfo>,
+    pub(super) cwd: &'a str,
+    pub(super) harness: &'a str,
+    pub(super) model: Option<String>,
+    pub(super) busy: bool,
+    pub(super) waiting: Option<&'static str>,
+    pub(super) mono: Option<String>,
+    pub(super) pending: Vec<turns::Pending>,
     /// A Mono's launched sessions, as the phone's cards show them.
-    launches: &'a HashMap<i64, Value>,
+    pub(super) launches: &'a HashMap<i64, Value>,
     /// The question the agent waits on, as the phone's card shows it; null
     /// for none, as always for a saved conversation.
-    question: Value,
+    pub(super) question: Value,
     /// The store cursor for turns above `rows`, which the phone pages in
     /// through `conversation.older`.
-    history: Option<i64>,
+    pub(super) history: Option<i64>,
 }
 impl Snapshot<'_> {
-    fn source(&self) -> turns::Source<'_> {
+    pub(super) fn source(&self) -> turns::Source<'_> {
         turns::Source {
             rows: self.rows,
             turns: self.turns,
@@ -186,7 +186,7 @@ fn visual_tree(body: &str) -> Result<Value, String> {
     serde_json::to_value(tree).map_err(|e| e.to_string())
 }
 
-fn project_id(path: &str) -> String {
+pub(super) fn project_id(path: &str) -> String {
     let mut out = String::with_capacity(path.len());
     for byte in path.bytes() {
         if byte.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&byte) {
@@ -197,11 +197,169 @@ fn project_id(path: &str) -> String {
     }
     out
 }
-fn hex(color: u32) -> String {
+pub(super) fn hex(color: u32) -> String {
     format!("#{:06x}", color & 0xff_ffff)
 }
-fn string(params: &Value, key: &str) -> Option<String> {
+pub(super) fn string(params: &Value, key: &str) -> Option<String> {
     params[key].as_str().map(str::to_owned)
+}
+
+/// Everything catalog assembly needs from live shell state, collected on the
+/// main thread before the store work moves to a background executor.
+pub(super) struct CatalogInputs {
+    pub(super) projects: Vec<Value>,
+    pub(super) entries: Vec<CatalogEntry>,
+    pub(super) monos: Vec<(monocode_core::mono::Mono, Option<Value>)>,
+    pub(super) saved_monos: Vec<(i64, Option<u64>)>,
+    pub(super) previews: HashMap<i64, MonoPreview>,
+    pub(super) ids: HashMap<i64, String>,
+}
+
+/// The store-reading half of catalog construction, shared by the phone
+/// publish loop and workspace IPC answers. Returns the catalog payload plus
+/// the id/preview caches the caller persists back.
+pub(super) async fn assemble_catalog(
+    store: &Database,
+    inputs: CatalogInputs,
+) -> Result<(Value, HashMap<i64, String>, HashMap<i64, MonoPreview>), String> {
+    let CatalogInputs {
+        projects,
+        entries,
+        monos,
+        saved_monos,
+        mut previews,
+        mut ids,
+        ..
+    } = inputs;
+
+    let saved = {
+        let store = locked(store)?;
+        for id in entries
+            .iter()
+            .map(|entry| entry.id)
+            .chain(monos.iter().filter_map(|(mono, _)| mono.session_id))
+        {
+            if let std::collections::hash_map::Entry::Vacant(entry) = ids.entry(id)
+                && let Ok(value) = store.persisted_session_id(id)
+            {
+                entry.insert(value);
+            }
+        }
+        for (id, updated_at) in &saved_monos {
+            let fresh = previews
+                .get(id)
+                .is_some_and(|p| updated_at.is_some_and(|at| at == p.updated_at));
+            if fresh {
+                continue;
+            }
+            let Ok(history) = store.load(*id) else {
+                continue;
+            };
+            let text = turns::messages(&history.rows)
+                .pop()
+                .map(|m| m["text"].clone())
+                .unwrap_or(json!(""));
+            previews.insert(
+                *id,
+                MonoPreview {
+                    updated_at: updated_at.unwrap_or(0),
+                    text,
+                },
+            );
+        }
+        previews.retain(|id, _| saved_monos.iter().any(|(saved, _)| saved == id));
+        store.mobile_session_metadata()?
+    };
+    let mut branches = HashMap::new();
+    let projects: Vec<_> = projects
+        .into_iter()
+        .map(|mut project| {
+            let cwd = project["path"].as_str().unwrap_or_default().to_owned();
+            project["branch"] = json!(mobile_catalog::checkout_branch(&cwd, &mut branches));
+            project
+        })
+        .collect();
+    let mut sessions = Vec::new();
+    for entry in entries {
+        let Some(id) = ids.get(&entry.id) else {
+            continue;
+        };
+        let metadata = mobile_catalog::metadata(
+            saved.get(&entry.id).unwrap_or(&Default::default()),
+            entry.live.as_ref(),
+        );
+        let branch = if !metadata.worktree_removed
+            && metadata
+                .branch
+                .as_ref()
+                .is_none_or(|branch| branch.is_empty())
+        {
+            mobile_catalog::checkout_branch(
+                metadata
+                    .worktree_cwd
+                    .as_deref()
+                    .unwrap_or(&entry.summary.cwd),
+                &mut branches,
+            )
+        } else {
+            String::new()
+        };
+        sessions.push(mobile_catalog::session(
+            &entry.summary,
+            id,
+            &entry.project,
+            &metadata,
+            entry.live.as_ref(),
+            &branch,
+        ));
+    }
+    sessions.sort_by_key(|s| std::cmp::Reverse(s["updatedAt"].as_u64()));
+    let monos: Vec<Value> = monos
+        .into_iter()
+        .map(|(mono, live)| {
+            let mut value = json!({
+                "id": mono.id,
+                "name": mono.label(),
+                "mascot": mono.mascot,
+                "color": hex(mono.color),
+                "projectIds": mono.projects.iter().map(|p| project_id(p)).collect::<Vec<_>>(),
+                "unread": 0,
+                "status": "idle",
+                "busy": false,
+                "live": live.is_some(),
+                "lastMessage": "",
+                "lastActiveAt": 0,
+            });
+            if let Some(session) = mono.session_id.and_then(|id| ids.get(&id)) {
+                value["sessionId"] = json!(session);
+            }
+            if let Some(subsessions) = &mono.subsessions {
+                value["subsessions"] = json!(subsessions);
+            }
+            if let Some(preview) = mono.session_id.and_then(|id| previews.get(&id)) {
+                value["lastMessage"] = preview.text.clone();
+                value["lastActiveAt"] = json!(preview.updated_at);
+            }
+            if let Some(live) = live {
+                for (key, field) in live.as_object().into_iter().flatten() {
+                    if !field.is_null() {
+                        value[key] = field.clone();
+                    }
+                }
+            }
+            value
+        })
+        .collect();
+    Ok::<_, String>((
+        // `monoTools`: this desktop answers the phone's Mono profile,
+        // editing, reset, delete and create; the older app doesn't,
+        // and its phones hide them. `push`: it notifies phones through
+        // Expo, so they no longer post their own alerts. `monoFiles`:
+        // it reads and saves a Mono's soul and memory for the phone.
+        json!({"projects": projects, "monos": monos, "sessions": sessions, "monoTools": true, "push": true, "monoFiles": true}),
+        ids,
+        previews,
+    ))
 }
 
 impl Shell {
@@ -441,13 +599,9 @@ impl Shell {
             .collect()
     }
 
-    fn publish_mobile_catalog(&mut self, cx: &mut Context<Self>) {
-        let Some(host) = self.mobile.host.clone() else {
-            return;
-        };
-        if self.mobile.publishing || !host.enabled() {
-            return;
-        }
+    /// The main-thread half of catalog construction: live workspace state,
+    /// as both the phone publish and the workspace IPC answer need it.
+    pub(super) fn catalog_inputs(&self, cx: &App) -> CatalogInputs {
         let paths = self.mobile_projects(cx);
         let projects: Vec<Value> = paths
             .iter()
@@ -513,104 +667,29 @@ impl Shell {
             .filter_map(|(mono, _)| mono.session_id)
             .map(|id| (id, self.session_summaries.get(&id).map(|s| s.updated_at)))
             .collect();
-        let mut previews = self.mobile.mono_previews.clone();
+        CatalogInputs {
+            projects,
+            entries,
+            monos,
+            saved_monos,
+            previews: self.mobile.mono_previews.clone(),
+            ids: self.mobile.ids.clone(),
+        }
+    }
+
+    fn publish_mobile_catalog(&mut self, cx: &mut Context<Self>) {
+        let Some(host) = self.mobile.host.clone() else {
+            return;
+        };
+        if self.mobile.publishing || !host.enabled() {
+            return;
+        }
+        let inputs = self.catalog_inputs(cx);
         let store = self.store.clone();
-        let mut ids = self.mobile.ids.clone();
         self.mobile.publishing = true;
-        let work = cx.background_executor().spawn(async move {
-            let saved = {
-                let store = locked(&store)?;
-                for id in entries.iter().map(|entry| entry.id).chain(monos.iter().filter_map(|(mono, _)| mono.session_id)) {
-                    if let std::collections::hash_map::Entry::Vacant(entry) = ids.entry(id)
-                        && let Ok(value) = store.persisted_session_id(id)
-                    {
-                        entry.insert(value);
-                    }
-                }
-                for (id, updated_at) in &saved_monos {
-                    let fresh = previews
-                        .get(id)
-                        .is_some_and(|p| updated_at.is_some_and(|at| at == p.updated_at));
-                    if fresh {
-                        continue;
-                    }
-                    let Ok(history) = store.load(*id) else {
-                        continue;
-                    };
-                    let text = turns::messages(&history.rows)
-                        .pop()
-                        .map(|m| m["text"].clone())
-                        .unwrap_or(json!(""));
-                    previews.insert(*id, MonoPreview { updated_at: updated_at.unwrap_or(0), text });
-                }
-                previews.retain(|id, _| saved_monos.iter().any(|(saved, _)| saved == id));
-                store.mobile_session_metadata()?
-            };
-            let mut branches = HashMap::new();
-            let projects: Vec<_> = projects.into_iter().map(|mut project| {
-                let cwd = project["path"].as_str().unwrap_or_default().to_owned();
-                project["branch"] = json!(mobile_catalog::checkout_branch(&cwd, &mut branches));
-                project
-            }).collect();
-            let mut sessions = Vec::new();
-            for entry in entries {
-                let Some(id) = ids.get(&entry.id) else {
-                    continue;
-                };
-                let metadata = mobile_catalog::metadata(saved.get(&entry.id).unwrap_or(&Default::default()), entry.live.as_ref());
-                let branch = if !metadata.worktree_removed && metadata.branch.as_ref().is_none_or(|branch| branch.is_empty()) {
-                    mobile_catalog::checkout_branch(metadata.worktree_cwd.as_deref().unwrap_or(&entry.summary.cwd), &mut branches)
-                } else { String::new() };
-                sessions.push(mobile_catalog::session(&entry.summary, id, &entry.project, &metadata, entry.live.as_ref(), &branch));
-            }
-            sessions.sort_by_key(|s| std::cmp::Reverse(s["updatedAt"].as_u64()));
-            let monos: Vec<Value> = monos
-                .into_iter()
-                .map(|(mono, live)| {
-                    let mut value = json!({
-                        "id": mono.id,
-                        "name": mono.label(),
-                        "mascot": mono.mascot,
-                        "color": hex(mono.color),
-                        "projectIds": mono.projects.iter().map(|p| project_id(p)).collect::<Vec<_>>(),
-                        "unread": 0,
-                        "status": "idle",
-                        "busy": false,
-                        "live": live.is_some(),
-                        "lastMessage": "",
-                        "lastActiveAt": 0,
-                    });
-                    if let Some(session) = mono.session_id.and_then(|id| ids.get(&id)) {
-                        value["sessionId"] = json!(session);
-                    }
-                    if let Some(subsessions) = &mono.subsessions {
-                        value["subsessions"] = json!(subsessions);
-                    }
-                    if let Some(preview) = mono.session_id.and_then(|id| previews.get(&id)) {
-                        value["lastMessage"] = preview.text.clone();
-                        value["lastActiveAt"] = json!(preview.updated_at);
-                    }
-                    if let Some(live) = live {
-                        for (key, field) in live.as_object().into_iter().flatten() {
-                            if !field.is_null() {
-                                value[key] = field.clone();
-                            }
-                        }
-                    }
-                    value
-                })
-                .collect();
-            Ok::<_, String>((
-                // `monoTools`: this desktop answers the phone's Mono profile,
-                // editing, reset, delete and create; the older app doesn't,
-                // and its phones hide them. `push`: it notifies phones through
-                // Expo, so they no longer post their own alerts. `monoFiles`:
-                // it reads and saves a Mono's soul and memory for the phone.
-                json!({"projects": projects, "monos": monos, "sessions": sessions, "monoTools": true, "push": true, "monoFiles": true}),
-                ids,
-                previews,
-            ))
-        });
+        let work = cx
+            .background_executor()
+            .spawn(async move { assemble_catalog(&store, inputs).await });
         cx.spawn(async move |this, cx| {
             let result = work.await;
             let _ = this.update(cx, |this, _| {
@@ -651,7 +730,7 @@ impl Shell {
     /// The sessions a Mono started, as the cards in its chat show them on the
     /// phone: the phone's IDs for each and the project it runs in, its title
     /// and how it stands. None for a session's own conversation.
-    fn mobile_launches(&self, target: &Target, cx: &App) -> HashMap<i64, Value> {
+    pub(super) fn mobile_launches(&self, target: &Target, cx: &App) -> HashMap<i64, Value> {
         let Target::Mono(mono) = target else {
             return HashMap::new();
         };
@@ -973,7 +1052,7 @@ impl Shell {
     }
 
     /// Runs `f` on the open chat's transcript when its history is in memory.
-    fn with_live_snapshot<T>(
+    pub(super) fn with_live_snapshot<T>(
         &self,
         target: &Target,
         cx: &App,
@@ -1016,7 +1095,7 @@ impl Shell {
         Some(f(&snapshot))
     }
 
-    fn load_saved(
+    pub(super) fn load_saved(
         &self,
         target: &Target,
         cx: &mut Context<Self>,
@@ -1497,9 +1576,10 @@ impl Shell {
                                     .collect(),
                                 cx,
                             )
+                            .map(|_| ())
                         }),
                 });
-                let result = result.map(|()| json!({"sessionId": conversation}));
+                let result = result.map(|_| json!({"sessionId": conversation}));
                 this.schedule_mobile_push(cx);
                 finish(this, request, result);
             });
@@ -2253,14 +2333,14 @@ fn tone_id(tone: Tone) -> &'static str {
 
 /// An older page's turn ID, `p{cursor}t{row}`: its page's store cursor and
 /// the row its turn starts at.
-fn page_turn(id: &str) -> Option<(i64, usize)> {
+pub(super) fn page_turn(id: &str) -> Option<(i64, usize)> {
     let (cursor, row) = id.strip_prefix('p')?.split_once('t')?;
     Some((cursor.parse().ok()?, row.parse().ok()?))
 }
 
 /// See `Shell::mobile_older_page`. Before a page's first turn it reads the
 /// page before that one.
-fn older_page(
+pub(super) fn older_page(
     store: &monocode_core::store::Store,
     session: i64,
     mut cursor: i64,
@@ -2309,7 +2389,7 @@ fn older_page(
         let Some((start, mut built)) = turns else {
             // Before this page's first turn: the page above it, if any.
             let Some(above) = page.before else {
-                return Ok(json!({"turns": [], "older": false}));
+                return Ok(json!({"turns": [], "older": false, "conversationId": session}));
             };
             cursor = above;
             page = store.load_before(session, cursor, false)?;
@@ -2322,11 +2402,11 @@ fn older_page(
                 turn["id"] = json!(id);
             }
         }
-        return Ok(json!({"turns": built, "older": start > 0 || page.before.is_some()}));
+        return Ok(json!({"turns": built, "older": start > 0 || page.before.is_some(), "conversationId": session}));
     }
 }
 
-fn saved_snapshot(saved: &Saved) -> Snapshot<'_> {
+pub(super) fn saved_snapshot(saved: &Saved) -> Snapshot<'_> {
     Snapshot {
         usage_limit: crate::conversation::mobile_usage_state(
             saved.id,

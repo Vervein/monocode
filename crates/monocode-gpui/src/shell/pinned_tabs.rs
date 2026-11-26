@@ -107,6 +107,9 @@ impl Shell {
         match tab {
             TitleTab::Session(id) => MenuTarget::Tab(*id),
             TitleTab::Mono { id, .. } => MenuTarget::MonoTab(id.clone()),
+            TitleTab::RemoteMono { machine_id, id } => {
+                MenuTarget::RemoteMonoTab(machine_id.clone(), id.clone())
+            }
             TitleTab::Search => MenuTarget::SearchTab,
             TitleTab::App(view) => MenuTarget::AppTab(*view),
         }
@@ -150,6 +153,37 @@ impl Shell {
                         mono.label().into(),
                     ),
                     None => (Face::Neutral, div().into_any_element(), "Mono".into()),
+                }
+            }
+            TitleTab::RemoteMono { machine_id, id } => {
+                let entry = (self.remote_workspaces.selected.as_deref() == Some(machine_id))
+                    .then(|| self.remote_workspace_entry("monos", id))
+                    .flatten()
+                    .map(|(_, entry)| entry);
+                match entry {
+                    Some(entry) => {
+                        let color = u32::from_str_radix(
+                            entry["color"]
+                                .as_str()
+                                .unwrap_or("#888888")
+                                .trim_start_matches('#'),
+                            16,
+                        )
+                        .unwrap_or(0x888888);
+                        (
+                            Face::Neutral,
+                            crate::monos::avatar::avatar(
+                                entry["mascot"].as_str().unwrap_or("mono"),
+                                color,
+                                entry["status"].as_str().unwrap_or("idle"),
+                                14.,
+                                true,
+                            )
+                            .into_any_element(),
+                            entry["name"].as_str().unwrap_or("Mono").into(),
+                        )
+                    }
+                    None => (Face::Neutral, neutral("globe"), "Remote Mono".into()),
                 }
             }
             TitleTab::Search => (Face::Neutral, neutral("search"), "Search".into()),
@@ -571,7 +605,7 @@ mod tests {
             .unwrap();
         cx.run_until_parked();
         let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
-        visual.simulate_keystrokes("cmd-w");
+        visual.simulate_keystrokes(&format!("{}-w", crate::shell::tests::modifier()));
         visual.run_until_parked();
         window
             .update(visual, |shell, w, cx| {
@@ -612,7 +646,7 @@ mod tests {
         cx.run_until_parked();
         let visual = &mut gpui::VisualTestContext::from_window(window.into(), cx);
         visual.refresh().unwrap();
-        visual.simulate_keystrokes("cmd-2");
+        visual.simulate_keystrokes(&format!("{}-2", crate::shell::tests::modifier()));
         visual.run_until_parked();
         visual.refresh().unwrap();
         window

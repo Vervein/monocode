@@ -5,6 +5,7 @@ use std::sync::mpsc::{self, Receiver};
 
 use super::delivery::{Permission, Target};
 
+#[allow(dead_code)]
 pub struct Notification {
     pub tag: String,
     pub subtitle: String,

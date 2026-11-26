@@ -37,6 +37,8 @@ pub mod usage;
 pub mod user_links;
 pub mod visual;
 pub mod visual_bridge;
+pub mod workspace_ipc;
+pub mod workspace_protocol;
 
 pub mod composer;
 pub mod contributions;

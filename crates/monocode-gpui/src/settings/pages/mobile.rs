@@ -1090,10 +1090,13 @@ fn pairing_icon_action(
 
 /// Modal.tsx's stationary GlassBackdrop, below the scrolling content.
 fn pairing_backdrop(classic: bool) -> impl IntoElement {
+    let _ = classic;
     canvas(
         |_, _, _| {},
         move |bounds, _, window, _| {
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             let light = content(1.).l < 0.5;
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             let fill = if classic || light {
                 let mut fill = shell_fill();
                 fill.a = if light { 1. } else { 0.55 };
